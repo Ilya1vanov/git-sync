@@ -658,7 +658,7 @@ Commands:
   install -r <dir>             Add every repo directly inside <dir> (depth 1)
   uninstall [<path>]           Remove a repo from the sync list
   list                         List synced repos
-  status                       Show agent state and per-repo sync status
+  status [--verbose]           Show agent state and per-repo sync status
   start                        Install and load the launchd agent
   stop                         Unload and remove the launchd agent
   config [--global] [--force] [--unset] [<key> [<value>]]
@@ -965,8 +965,41 @@ cmd_notifications() {
   fi
 }
 
+# status_compact_repo REPO: at most two lines — "<result> <path> <last run>",
+# then blocker keys if any, else notes if any.
+status_compact_repo() {
+  local repo=$1 shown=$1 result when keys notes sf
+  case "$repo" in "$HOME"/*) shown="~${repo#"$HOME"}" ;; esac
+  if [ ! -d "$repo" ]; then
+    printf '%-8s %s\n' missing "$shown"
+    return 0
+  fi
+  result=$(status_field "$repo" result)
+  if [ -z "$result" ]; then
+    printf '%-8s %s\n' never "$shown"
+    return 0
+  fi
+  when=$(status_field "$repo" lastRun | sed 's/T/ /; s/:[0-9][0-9][+-][0-9]*$//')
+  printf '%-8s %s  %s\n' "$result" "$shown" "$when"
+  sf=$(status_file "$repo")
+  keys=$(git config -f "$sf" --get-all status.blocker 2>/dev/null | cut -d' ' -f1 |
+    paste -sd, - | sed 's/,/, /g')
+  if [ -n "$keys" ]; then
+    echo "           blocked by: $keys"
+    return 0
+  fi
+  notes=$(git config -f "$sf" --get-all status.note 2>/dev/null | paste -sd';' - | sed 's/;/; /g')
+  [ -z "$notes" ] || echo "           note: $notes"
+}
+
 cmd_status() {
-  local repo first=1 v
+  local repo first=1 v verbose=0
+  case "${1:-}" in
+    "") ;;
+    -v|--verbose) verbose=1 ;;
+    *) usage_die "unknown option for status: $1" ;;
+  esac
+  [ $# -le 1 ] || usage_die "usage: git-sync status [--verbose]"
   if agent_loaded; then echo "Agent:         loaded"; else echo "Agent:         not loaded"; fi
   echo "Period:        $(cfg_get sync.period)"
   if [ "$(cfg_get notify.enabled)" = true ]; then
@@ -976,6 +1009,10 @@ cmd_status() {
   fi
   if [ -z "$(list_repos)" ]; then
     echo "No repos."
+    return 0
+  fi
+  if [ "$verbose" -eq 0 ]; then
+    list_repos | while IFS= read -r repo; do status_compact_repo "$repo"; done
     return 0
   fi
   list_repos | while IFS= read -r repo; do

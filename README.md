@@ -79,7 +79,8 @@ Unknown keys are rejected unless `--force` is given.
 ## Commands
 
 ```
-git-sync init | install [<path>] | install -r <dir> | uninstall [<path>] | list | status
+git-sync init | install [<path>] | install -r <dir> | uninstall [<path>] | list
+git-sync status [--verbose]
 git-sync start | stop
 git-sync config [--global] [--force] [--unset] [<key> [<value>]]
 git-sync sync [--all]
@@ -133,8 +134,22 @@ when Git's own thresholds say so. Git's maintenance scheduler
 ## Status and logs
 
 ```sh
-git-sync status    # agent state, period, notifications, and per-repo detail
-git-sync list      # one line per repo: path, mode, last result
+git-sync status            # agent state, period, notifications, then per repo:
+                           #   <result> <path> <last run>, plus blocker keys
+                           #   (or notes) on a second line when there are any
+git-sync status --verbose  # full per-repo detail: mode, last run/success,
+                           #   every blocker with its detail, every note
+git-sync list              # one line per repo: path, mode, last result
+```
+
+Compact example:
+
+```
+ok       ~/projects/app  2026-10-01 15:33
+blocked  ~/projects/api  2026-10-01 15:34
+           blocked by: develop:dirty, fetch-failed:upstream
+ok       ~/projects/web  2026-10-01 15:34
+           note: main: skipped (checked out)
 ```
 
 Files under `~/.git-sync` (override with `GIT_SYNC_HOME`):

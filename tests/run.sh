@@ -511,14 +511,41 @@ test_period_change_without_agent_does_not_start() {
 }
 test_status_output() {
   gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null &&
-  out=$(gs status) && assert_contains "$out" "Agent:         not loaded" &&
+  out=$(gs status --verbose) && assert_contains "$out" "Agent:         not loaded" &&
   assert_contains "$out" "Period:        20m" && assert_contains "$out" "Notifications: disabled" &&
   assert_contains "$out" "  result:        never" &&
   push_commit main && git -C "$WORK" remote add dead "$T/nope.git" && (cd "$WORK" && gs sync >/dev/null);
-  gs start >/dev/null && out=$(gs status) && assert_contains "$out" "Agent:         loaded" &&
+  gs start >/dev/null && out=$(gs status --verbose) && assert_contains "$out" "Agent:         loaded" &&
   assert_contains "$out" "$WORK" && assert_contains "$out" "  mode:          fast-forward" &&
   assert_contains "$out" "  result:        blocked" && assert_contains "$out" "  blocker:       fetch-failed:dead" &&
   assert_contains "$out" "  note:          main: skipped (checked out)" && assert_contains "$out" "  last run:"
+}
+test_status_compact() {
+  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null &&
+  git clone -q "$T/remote.git" "$T/other" && gs install "$T/other" >/dev/null &&
+  git clone -q "$T/remote.git" "$T/gone" && gs install "$T/gone" >/dev/null && rm -rf "$T/gone" &&
+  push_commit main && git -C "$WORK" remote add dead "$T/nope.git" && quiet "$GS" sync --all &&
+  git clone -q "$T/remote.git" "$T/fresh" && gs install "$T/fresh" >/dev/null &&
+  out=$(gs status) &&
+  assert_contains "$out" "Notifications: disabled" &&
+  assert_not_contains "$out" "  mode:" && assert_not_contains "$out" "last success" &&
+  # repo with blocker + note: 2 lines, blockers win over notes
+  assert_contains "$out" "blocked  $WORK  " &&
+  assert_contains "$out" "
+           blocked by: fetch-failed:dead" &&
+  # repo with only a note: note on second line
+  assert_contains "$out" "ok       $T/other  " &&
+  assert_contains "$out" "
+           note: main: skipped (checked out)" &&
+  assert_contains "$out" "missing  $T/gone" &&
+  assert_contains "$out" "never    $T/fresh" &&
+  # header (3) + work (2) + other (2) + gone (1) + fresh (1)
+  assert_eq "$(printf '%s\n' "$out" | wc -l | tr -d ' ')" 9
+}
+test_status_compact_tilde_and_bad_flag() {
+  gs init >/dev/null && git init -q "$HOME/proj" && gs install "$HOME/proj" >/dev/null &&
+  assert_contains "$(gs status)" "never    ~/proj" &&
+  { gs status --bogus 2>/dev/null; assert_eq $? 2; }
 }
 test_status_no_repos() {
   gs init >/dev/null && out=$(gs status) && assert_contains "$out" "No repos."
