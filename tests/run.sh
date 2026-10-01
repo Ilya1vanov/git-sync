@@ -163,6 +163,69 @@ test_config_list_shows_sources() {
   assert_not_contains "$out" "sync.repo"
 }
 
+test_install_current_repo() {
+  gs init >/dev/null && make_repos && cd "$WORK" &&
+  out=$(gs install) && assert_contains "$out" "Installed: $WORK" &&
+  assert_eq "$(git config -f "$GIT_SYNC_HOME/config" --get-all sync.repo)" "$WORK"
+}
+test_install_idempotent() {
+  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null &&
+  out=$(gs install "$WORK") && assert_contains "$out" "Already installed" &&
+  assert_eq "$(git config -f "$GIT_SYNC_HOME/config" --get-all sync.repo | wc -l | tr -d ' ')" 1
+}
+test_install_subdir_resolves_root() {
+  gs init >/dev/null && make_repos && mkdir -p "$WORK/a/b" &&
+  gs install "$WORK/a/b" >/dev/null &&
+  assert_eq "$(git config -f "$GIT_SYNC_HOME/config" --get-all sync.repo)" "$WORK"
+}
+test_install_linked_worktree_registers_main() {
+  gs init >/dev/null && make_repos && git -C "$WORK" worktree add -q "$T/wt" -b feature &&
+  gs install "$T/wt" >/dev/null 2>"$T/err" &&
+  assert_contains "$(cat "$T/err")" "linked worktree" &&
+  assert_eq "$(git config -f "$GIT_SYNC_HOME/config" --get-all sync.repo)" "$WORK" &&
+  assert_contains "$(cat "$GIT_SYNC_HOME/git-sync.log")" "WARN"
+}
+test_install_not_a_repo() {
+  gs init >/dev/null && mkdir "$T/plain" &&
+  { gs install "$T/plain" 2>"$T/err"; assert_eq $? 1; } &&
+  assert_contains "$(cat "$T/err")" "not a git repository"
+}
+test_install_sets_origin_head() {
+  gs init >/dev/null && make_repos && git -C "$WORK" remote set-head origin -d &&
+  gs install "$WORK" >/dev/null &&
+  assert_eq "$(git -C "$WORK" symbolic-ref --short refs/remotes/origin/HEAD)" origin/main
+}
+test_install_path_with_spaces() {
+  gs init >/dev/null && make_repos "my repo" &&
+  gs install "$WORK" >/dev/null &&
+  out=$(gs list) && assert_contains "$out" "$WORK  fast-forward  never" &&
+  gs uninstall "$WORK" >/dev/null && assert_eq "$(gs list)" "No repos."
+}
+test_uninstall_cleans_up() {
+  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null &&
+  (cd "$WORK" && gs config sync.mode maintain-only) &&
+  sf="$GIT_SYNC_HOME/status/$(printf %s "$WORK" | shasum -a 1 | cut -c1-16)" &&
+  : > "$sf" &&
+  out=$(gs uninstall "$WORK") && assert_contains "$out" "Uninstalled: $WORK" &&
+  ! git -C "$WORK" config git-sync.mode >/dev/null && assert_no_file "$sf" &&
+  assert_eq "$(gs list)" "No repos."
+}
+test_uninstall_not_listed() {
+  gs init >/dev/null && make_repos &&
+  { gs uninstall "$WORK" 2>/dev/null; assert_eq $? 1; }
+}
+test_uninstall_missing_path() {
+  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null && rm -rf "$WORK" &&
+  gs uninstall "$WORK" >/dev/null && assert_eq "$(gs list)" "No repos."
+}
+test_list_formats() {
+  gs init >/dev/null && assert_eq "$(gs list)" "No repos." &&
+  make_repos && gs install "$WORK" >/dev/null &&
+  (cd "$WORK" && gs config sync.mode maintain-and-fetch) &&
+  assert_eq "$(gs list)" "$WORK  maintain-and-fetch  never" &&
+  rm -rf "$WORK" && assert_eq "$(gs list)" "$WORK  fast-forward  missing"
+}
+
 # --- runner ---
 if [ $# -gt 0 ]; then TESTS="$*"; else
   TESTS=$(grep -E '^test_[a-z0-9_]+\(\)' "$0" | sed 's/().*//')
