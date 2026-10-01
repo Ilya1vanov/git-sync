@@ -124,7 +124,7 @@ test_config_set_global_and_validate() {
   { gs config --global sync.branches "bad..name" 2>/dev/null; [ $? -ne 0 ]; } &&
   { gs config --global sync.ffCheckedOut yes 2>/dev/null; [ $? -ne 0 ]; } &&
   { gs config --global sync.period "$(printf '20m\nx')" 2>/dev/null; [ $? -ne 0 ]; } &&
-  gs config --global notify.events "start finished blocked" &&
+  gs config --global notify.events "finished blocked" &&
   gs config --global log.maxSize 512K && gs config --global sync.period 90 &&
   assert_eq "$(gs config sync.period)" 90
 }
@@ -598,7 +598,8 @@ ncalls() { cat "$T/notify.calls" 2>/dev/null; }
 test_notifications_command() {
   gs init >/dev/null && assert_eq "$(gs notifications)" disabled &&
   gs notifications enable >/dev/null && assert_eq "$(gs notifications)" "enabled (blocked)" &&
-  gs config --global notify.events "start finished" && assert_eq "$(gs notifications)" "enabled (start finished)" &&
+  gs config --global notify.events "finished blocked" && assert_eq "$(gs notifications)" "enabled (finished blocked)" &&
+  { gs config --global notify.events "start finished" 2>/dev/null; [ $? -ne 0 ]; } &&
   gs notifications disable >/dev/null && assert_eq "$(gs notifications)" disabled &&
   { gs notifications maybe 2>/dev/null; assert_eq $? 2; }
 }
@@ -617,11 +618,29 @@ test_notify_blocked_dedupe() {
   git -C "$WORK" remote add dead2 "$T/nope2.git" && quiet "$GS" sync --all --job &&
   assert_eq "$(ncalls | tail -1)" "git-sync: work|fetch-failed:dead2"
 }
-test_notify_start_finished() {
-  gs init >/dev/null && gs notifications enable >/dev/null && gs config --global notify.events "start finished" &&
+test_notify_finished_summary() {
+  gs init >/dev/null && gs notifications enable >/dev/null && gs config --global notify.events finished &&
   make_repos && gs install "$WORK" >/dev/null && gs sync --all --job >/dev/null 2>&1 &&
-  assert_eq "$(ncalls)" "git-sync|Sync started (1 repos)
-git-sync|1 repos: 1 ok, 0 blocked, 0 failed"
+  assert_eq "$(ncalls)" "git-sync|1 repos: 1 ok, 0 blocked, 0 failed"
+}
+test_notify_one_per_run_combined() {
+  gs init >/dev/null && gs notifications enable >/dev/null && gs config --global notify.events "blocked finished" &&
+  make_repos && gs install "$WORK" >/dev/null && git -C "$WORK" remote add dead "$T/nope.git" &&
+  git clone -q "$T/remote.git" "$T/other" && gs install "$T/other" >/dev/null &&
+  git -C "$T/other" remote add dead "$T/nope.git" &&
+  quiet "$GS" sync --all --job &&
+  assert_eq "$(ncalls)" "git-sync: 2 repos newly blocked|work: fetch-failed:dead; other: fetch-failed:dead — 2 repos: 0 ok, 2 blocked, 0 failed" &&
+  # next run: nothing new, only the summary
+  quiet "$GS" sync --all --job &&
+  assert_eq "$(ncalls | wc -l | tr -d ' ')" 2 &&
+  assert_eq "$(ncalls | tail -1)" "git-sync|2 repos: 0 ok, 2 blocked, 0 failed"
+}
+test_notify_legacy_start_ignored() {
+  gs init >/dev/null && gs notifications enable >/dev/null &&
+  git config -f "$GIT_SYNC_HOME/config" notify.events "start blocked" &&
+  make_repos && gs install "$WORK" >/dev/null && git -C "$WORK" remote add dead "$T/nope.git" &&
+  quiet "$GS" sync --all --job &&
+  assert_eq "$(ncalls)" "git-sync: work|fetch-failed:dead"
 }
 test_job_mode_quiet_stdout() {
   gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null &&

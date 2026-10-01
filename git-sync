@@ -158,8 +158,8 @@ validate_value() {
       set -f
       for w in $v; do
         case "$w" in
-          start|finished|blocked) ;;
-          *) echo "git-sync: invalid notify event: $w (allowed: start finished blocked)" >&2; set +f; return 1 ;;
+          finished|blocked) ;;
+          *) echo "git-sync: invalid notify event: $w (allowed: finished blocked)" >&2; set +f; return 1 ;;
         esac
       done
       set +f ;;
@@ -625,10 +625,11 @@ notify_wanted() {
   return "$found"
 }
 
-notify_run_start() {
-  if notify_wanted start; then notify "git-sync" "Sync started ($1 repos)"; fi
-  return 0
-}
+# A run sends at most one notification, at the end: newly blocked repos (event
+# `blocked`) and/or the run summary (event `finished`). notify_repo only
+# collects; notify_run_end sends.
+NOTIFY_NEW_BLOCKED=   # "; "-separated "<repo>: <key>, <key>"
+NOTIFY_NEW_COUNT=0
 
 notify_repo() {
   local k new=
@@ -638,13 +639,29 @@ notify_repo() {
       new=${new:+$new, }$k
     fi
   done
-  if [ -n "$new" ]; then notify "git-sync: $(basename "$1")" "$new"; fi
+  [ -n "$new" ] || return 0
+  NOTIFY_NEW_COUNT=$((NOTIFY_NEW_COUNT + 1))
+  NOTIFY_NEW_BLOCKED=${NOTIFY_NEW_BLOCKED:+$NOTIFY_NEW_BLOCKED; }"$(basename "$1"): $new"
+  NOTIFY_LAST_REPO=$(basename "$1") NOTIFY_LAST_KEYS=$new
   return 0
 }
 
 notify_run_end() {
-  if notify_wanted finished; then notify "git-sync" "$(( $1 + $2 + $3 )) repos: $1 ok, $2 blocked, $3 failed"; fi
-  return 0
+  local title msg summary=
+  if notify_wanted finished; then
+    summary="$(( $1 + $2 + $3 )) repos: $1 ok, $2 blocked, $3 failed"
+  fi
+  if [ "$NOTIFY_NEW_COUNT" -eq 1 ]; then
+    title="git-sync: $NOTIFY_LAST_REPO" msg=$NOTIFY_LAST_KEYS
+  elif [ "$NOTIFY_NEW_COUNT" -gt 1 ]; then
+    title="git-sync: $NOTIFY_NEW_COUNT repos newly blocked" msg=$NOTIFY_NEW_BLOCKED
+  elif [ -n "$summary" ]; then
+    notify "git-sync" "$summary"
+    return 0
+  else
+    return 0
+  fi
+  notify "$title" "$msg${summary:+ — $summary}"
 }
 
 # ---- commands ----
@@ -809,7 +826,6 @@ cmd_sync() {
   fi
   n=$(printf '%s' "$entries" | grep -c .)
   log_msg INFO "run start ($n repos)"
-  if command -v notify_run_start >/dev/null 2>&1; then notify_run_start "$n"; fi
   if [ "$all" = 0 ]; then
     if repo_listed "$repo"; then
       listed=1

@@ -61,7 +61,7 @@ Resolution order: per-repo value, then global value, then default. Inspect with
 | `sync.ffCheckedOut` | yes | `false` | `true`, `false` |
 | `log.maxSize` | no | `3M` | number with optional `K`/`M`/`G`, bytes if no unit |
 | `notify.enabled` | no | `false` | `true`, `false` |
-| `notify.events` | no | `blocked` | non-empty subset of `start finished blocked` |
+| `notify.events` | no | `blocked` | non-empty subset of `finished blocked` |
 
 ```sh
 git-sync config sync.mode maintain-and-fetch      # this repo only
@@ -180,8 +180,12 @@ git-sync config --global notify.events "blocked finished"
 git-sync notifications            # show current state
 ```
 
-Events: `start` (run begins), `finished` (counts of ok/blocked/failed),
-`blocked` (a repo gained a blocker it did not have in its previous run).
+Events: `finished` (counts of ok/blocked/failed), `blocked` (a repo gained a
+blocker it did not have in its previous run). A run sends at most one
+notification, at its end, combining both: e.g. title
+`git-sync: 2 repos newly blocked`, message
+`api: develop:dirty; web: fetch-failed:origin — 40 repos: 38 ok, 2 blocked, 0 failed`.
+A legacy `start` in `notify.events` is ignored.
 
 Delivery uses `osascript`, so notifications appear as coming from "Script
 Editor". You may need to allow notifications for Script Editor in System
