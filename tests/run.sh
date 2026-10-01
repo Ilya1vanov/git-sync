@@ -542,6 +542,23 @@ test_status_compact() {
   # header (3) + work (2) + other (2) + gone (1) + fresh (1)
   assert_eq "$(printf '%s\n' "$out" | wc -l | tr -d ' ')" 9
 }
+test_sync_path_argument() {
+  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null &&
+  git clone -q "$T/remote.git" "$T/other" && gs install "$T/other" >/dev/null &&
+  mkdir -p "$WORK/sub" && cd "$T" &&
+  out=$(gs sync "$WORK/sub") && assert_eq "$out" "$WORK: ok" &&
+  assert_file "$(sf_of "$WORK")" && assert_no_file "$(sf_of "$T/other")"
+}
+test_sync_path_unlisted_and_errors() {
+  gs init >/dev/null && make_repos && cd "$T" &&
+  gs sync "$WORK" >/dev/null 2>"$T/err" && assert_contains "$(cat "$T/err")" "git-sync install" &&
+  assert_no_file "$(sf_of "$WORK")" &&
+  mkdir "$T/plain" &&
+  { gs sync "$T/plain" 2>"$T/err"; assert_eq $? 1; } &&
+  assert_contains "$(cat "$T/err")" "not a git repository: $T/plain" &&
+  { gs sync --all "$WORK" 2>/dev/null; assert_eq $? 2; } &&
+  { gs sync "$WORK" "$WORK" 2>/dev/null; assert_eq $? 2; }
+}
 test_status_blocked_first() {
   gs init >/dev/null && make_repos &&
   git clone -q "$T/remote.git" "$T/a" && gs install "$T/a" >/dev/null &&

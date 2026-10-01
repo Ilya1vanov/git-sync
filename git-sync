@@ -664,7 +664,7 @@ Commands:
   stop                         Unload and remove the launchd agent
   config [--global] [--force] [--unset] [<key> [<value>]]
                                Show or change configuration
-  sync [--all]                 Sync the current repo, or all listed repos
+  sync [<path> | --all]        Sync the current (or given) repo, or all listed repos
   notifications [enable|disable]
                                Show or toggle notifications
   help                         Show this help
@@ -779,17 +779,24 @@ cmd_list() {
 }
 
 cmd_sync() {
-  local all=0 repo n=0 ok=0 blocked=0 failed=0 rc=0 keys line entries listed
+  local all=0 repo n=0 ok=0 blocked=0 failed=0 rc=0 keys line entries listed path=
   while [ $# -gt 0 ]; do
     case "$1" in
       --all) all=1 ;;
       --job) GS_JOB=1 ;;
-      *) usage_die "sync: unknown argument: $1" ;;
+      -*) usage_die "sync: unknown argument: $1" ;;
+      *)
+        [ -z "$path" ] || usage_die "sync: only one <path> allowed"
+        path=$1 ;;
     esac
     shift
   done
+  [ "$all" = 0 ] || [ -z "$path" ] || usage_die "sync: use either --all or <path>"
   if [ "$all" = 1 ]; then
     entries=$(list_repos)
+  elif [ -n "$path" ]; then
+    repo=$(resolve_repo "$path") || die "not a git repository: $path"
+    entries=$repo
   else
     repo=$(resolve_repo .) || usage_die "not in a git repository; use 'git-sync sync --all'"
     entries=$repo
@@ -808,7 +815,7 @@ cmd_sync() {
       listed=1
     else
       listed=0
-      echo "hint: not in sync list; run 'git-sync install' to track it" >&2
+      echo "hint: not in sync list; run 'git-sync install $repo' to track it" >&2
     fi
   else
     listed=1

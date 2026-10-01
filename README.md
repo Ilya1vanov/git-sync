@@ -83,12 +83,13 @@ git-sync init | install [<path>] | install -r <dir> | uninstall [<path>] | list
 git-sync status [--verbose] [--blocked-first]
 git-sync start | stop
 git-sync config [--global] [--force] [--unset] [<key> [<value>]]
-git-sync sync [--all]
+git-sync sync [<path> | --all]
 git-sync notifications [enable|disable]
 git-sync help
 ```
 
-- `git-sync sync` syncs the current repo, `sync --all` every registered repo.
+- `git-sync sync` syncs the current repo, `sync <path>` the repo containing
+  `<path>`, `sync --all` every registered repo.
   It prints one line per repo and exits 1 if any repo is not `ok`. Manual runs
   never send notifications.
 - A linked worktree is registered as its main worktree (with a warning).
