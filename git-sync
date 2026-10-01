@@ -320,9 +320,111 @@ EOF
   return 0
 }
 
-# Implemented in Task 5.
+# ff_branch_list REPO: branches to fast-forward, one per line.
+ff_branch_list() {
+  local repo=$1 cfg b head
+  cfg=$(cfg_get sync.branches "$repo")
+  if [ -n "$cfg" ]; then
+    set -f
+    for b in $cfg; do printf '%s\n' "$b"; done
+    set +f
+    return 0
+  fi
+  head=$(git -C "$repo" symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null)
+  if [ -z "$head" ] && git -C "$repo" remote 2>/dev/null | grep -qx origin; then
+    case " $SYNC_FAILED_REMOTES " in
+      *" origin "*) ;;
+      *)
+        git -C "$repo" remote set-head origin --auto >/dev/null 2>&1
+        head=$(git -C "$repo" symbolic-ref -q --short refs/remotes/origin/HEAD 2>/dev/null)
+        ;;
+    esac
+  fi
+  if [ -n "$head" ]; then
+    printf '%s\n' "${head#origin/}"
+    return 0
+  fi
+  for b in develop main master; do
+    if git -C "$repo" show-ref --verify -q "refs/heads/$b"; then
+      printf '%s\n' "$b"
+      return 0
+    fi
+  done
+  return 0
+}
+
+# worktree_of REPO BRANCH: path of the worktree that has BRANCH checked out; rc 1 if none.
+worktree_of() {
+  local out
+  out=$(git -C "$1" worktree list --porcelain 2>/dev/null | awk -v ref="refs/heads/$2" '
+    /^worktree / { p = substr($0, 10) }
+    $0 == "branch " ref { print p; exit }')
+  [ -n "$out" ] || return 1
+  printf '%s\n' "$out"
+}
+
+# ff_inprogress WORKTREE: prints the name of the first in-progress operation marker.
+ff_inprogress() {
+  local w=$1 n p
+  for n in MERGE_HEAD CHERRY_PICK_HEAD REVERT_HEAD BISECT_LOG rebase-merge rebase-apply; do
+    p=$(git -C "$w" rev-parse --git-path "$n" 2>/dev/null) || continue
+    case "$p" in /*) ;; *) p="$w/$p" ;; esac
+    if [ -e "$p" ]; then
+      printf '%s\n' "$n"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# sync_ff REPO: fast-forward configured/default branches (spec "Sync algorithm" step 2).
 sync_ff() {
-  :
+  local repo=$1 b u remote old new w err name n ffco branches
+  ffco=$(cfg_get sync.ffCheckedOut "$repo")
+  branches=$(ff_branch_list "$repo")
+  while IFS= read -r b; do
+    [ -n "$b" ] || continue
+    git -C "$repo" show-ref --verify -q "refs/heads/$b" || continue
+    u=$(git -C "$repo" rev-parse -q --verify --symbolic-full-name "$b@{upstream}" 2>/dev/null)
+    [ -n "$u" ] || continue
+    remote=$(git -C "$repo" config "branch.$b.remote" 2>/dev/null)
+    case " $SYNC_FAILED_REMOTES " in *" $remote "*) continue ;; esac
+    old=$(git -C "$repo" rev-parse "refs/heads/$b" 2>/dev/null) || continue
+    new=$(git -C "$repo" rev-parse "$u" 2>/dev/null) || continue
+    [ "$old" != "$new" ] || continue
+    if ! git -C "$repo" merge-base --is-ancestor "$old" "$new"; then
+      add_blocker "$b:diverged" "ahead $(git -C "$repo" rev-list --count "$new..$old"), behind $(git -C "$repo" rev-list --count "$old..$new")"
+      continue
+    fi
+    if w=$(worktree_of "$repo" "$b"); then
+      if [ "$ffco" != true ]; then
+        add_note "$b: skipped (checked out)"
+        continue
+      fi
+      if name=$(ff_inprogress "$w"); then
+        add_blocker "$b:in-progress" "$name in $w"
+        continue
+      fi
+      n=$(git -C "$w" status --porcelain --untracked-files=no | wc -l | tr -d ' ')
+      if [ "$n" != 0 ]; then
+        add_blocker "$b:dirty" "$n tracked files changed in $w"
+        continue
+      fi
+      if ! err=$(git -C "$w" merge --ff-only --quiet "$new" 2>&1); then
+        add_blocker "$b:ff-failed" "$(first_line "$err")"
+        continue
+      fi
+    else
+      if ! err=$(git -C "$repo" fetch --quiet . "$u:refs/heads/$b" 2>&1); then
+        add_blocker "$b:ff-failed" "$(first_line "$err")"
+        continue
+      fi
+    fi
+    log_msg INFO "$repo $b: $(printf %s "$old" | cut -c1-7)..$(printf %s "$new" | cut -c1-7)"
+  done <<EOF
+$branches
+EOF
+  return 0
 }
 
 sync_maintenance() {
@@ -549,7 +651,7 @@ cmd_sync() {
   fi
   while IFS= read -r line; do
     [ -n "$line" ] || continue
-    sync_repo "$line" "$listed"
+    sync_repo "$line" "$listed" </dev/null
     keys=$(blocker_keys | paste -sd, -)
     if [ -n "$keys" ]; then
       printf '%s: %s (%s)\n' "$line" "$SYNC_RESULT" "$keys"

@@ -327,6 +327,126 @@ EOF
   assert_contains "$(git config -f "$(sf_of "$WORK")" --get-all status.blocker)" "fetch-failed:sshr"
 }
 
+ffsetup() { gs init >/dev/null && make_repos "$@" && gs install "$WORK" >/dev/null; }
+blockers() { git config -f "$(sf_of "$WORK")" --get-all status.blocker; }
+notes() { git config -f "$(sf_of "$WORK")" --get-all status.note; }
+
+test_ff_default_branch_not_checked_out() {
+  ffsetup && git -C "$WORK" checkout -q develop && push_commit main m2 &&
+  (cd "$WORK" && gs sync >/dev/null) &&
+  assert_eq "$(git -C "$WORK" rev-parse main)" "$(git -C "$T/remote.git" rev-parse main)" &&
+  assert_contains "$(cat "$GIT_SYNC_HOME/git-sync.log")" " main: "
+}
+test_ff_fallback_first_existing() {
+  ffsetup && git -C "$WORK" checkout -q -b scratch && git -C "$WORK" remote set-head origin -d &&
+  git -C "$T/remote.git" symbolic-ref HEAD refs/heads/nonexistent &&
+  before_main=$(git -C "$WORK" rev-parse main) && push_commit develop d2 && push_commit main m2 &&
+  quiet sh -c 'cd "$1" && "$2" sync' _ "$WORK" "$GS" &&
+  assert_eq "$(git -C "$WORK" rev-parse develop)" "$(git -C "$T/remote.git" rev-parse develop)" &&
+  assert_eq "$(git -C "$WORK" rev-parse main)" "$before_main"
+}
+test_ff_configured_branches() {
+  ffsetup && git -C "$WORK" checkout -q -b scratch && (cd "$WORK" && gs config sync.branches "develop main") &&
+  push_commit develop d2 && push_commit main m2 && (cd "$WORK" && gs sync >/dev/null) &&
+  assert_eq "$(git -C "$WORK" rev-parse develop)" "$(git -C "$T/remote.git" rev-parse develop)" &&
+  assert_eq "$(git -C "$WORK" rev-parse main)" "$(git -C "$T/remote.git" rev-parse main)"
+}
+test_ff_skips_missing_and_no_upstream() {
+  ffsetup && git -C "$WORK" checkout -q -b scratch && git -C "$WORK" branch -q local-only &&
+  (cd "$WORK" && gs config sync.branches "local-only ghost main") && push_commit main m2 &&
+  (cd "$WORK" && gs sync >/dev/null) && assert_eq "$(sget "$WORK" result)" ok && assert_eq "$(blockers)" ""
+}
+test_ff_diverged_blocked() {
+  ffsetup && git -C "$WORK" checkout -q develop && (cd "$WORK" && gs config sync.branches main) &&
+  git -C "$WORK" checkout -q main && git -C "$WORK" commit -q --allow-empty -m local &&
+  git -C "$WORK" checkout -q develop && push_commit main m2 &&
+  { (cd "$WORK" && gs sync >/dev/null); assert_eq $? 1; } &&
+  assert_contains "$(blockers)" "main:diverged ahead 1, behind 1"
+}
+test_ff_checked_out_skipped_by_default() {
+  ffsetup && push_commit main m2 && before=$(git -C "$WORK" rev-parse main) &&
+  (cd "$WORK" && gs sync >/dev/null) && assert_eq "$(git -C "$WORK" rev-parse main)" "$before" &&
+  assert_eq "$(sget "$WORK" result)" ok && assert_eq "$(notes)" "main: skipped (checked out)"
+}
+test_ff_checked_out_clean_when_enabled() {
+  ffsetup && (cd "$WORK" && gs config sync.ffCheckedOut true) && push_commit main m2 &&
+  echo u > "$WORK/untracked.txt" &&
+  (cd "$WORK" && gs sync >/dev/null) &&
+  assert_eq "$(git -C "$WORK" rev-parse HEAD)" "$(git -C "$T/remote.git" rev-parse main)"
+}
+test_ff_checked_out_dirty_blocked() {
+  ffsetup && (cd "$WORK" && gs config sync.ffCheckedOut true) &&
+  (cd "$T/pusher" && git checkout -q main && echo a > f && git add f && git commit -qm f && git push -q origin main) &&
+  (cd "$WORK" && git pull -q) && echo b > "$WORK/f" && push_commit main m3 &&
+  { (cd "$WORK" && gs sync >/dev/null); assert_eq $? 1; } &&
+  assert_contains "$(blockers)" "main:dirty 1 tracked files changed in $WORK"
+}
+test_ff_checked_out_in_progress_blocked() {
+  ffsetup && (cd "$WORK" && gs config sync.ffCheckedOut true) && push_commit main m2 &&
+  git -C "$WORK" rev-parse HEAD > "$WORK/.git/MERGE_HEAD" &&
+  { (cd "$WORK" && gs sync >/dev/null); assert_eq $? 1; } &&
+  assert_contains "$(blockers)" "main:in-progress MERGE_HEAD"
+}
+test_ff_untracked_would_be_overwritten() {
+  ffsetup && (cd "$WORK" && gs config sync.ffCheckedOut true) &&
+  (cd "$T/pusher" && git checkout -q main && echo r > clash && git add clash && git commit -qm clash && git push -q origin main) &&
+  echo local > "$WORK/clash" &&
+  { (cd "$WORK" && gs sync >/dev/null); assert_eq $? 1; } &&
+  assert_contains "$(blockers)" "main:ff-failed" && assert_eq "$(cat "$WORK/clash")" local
+}
+test_ff_linked_worktree_checked_out() {
+  ffsetup && (cd "$WORK" && gs config sync.branches develop && gs config sync.ffCheckedOut true) &&
+  git -C "$WORK" worktree add -q "$T/wt dev" develop && push_commit develop d2 &&
+  (cd "$WORK" && gs sync >/dev/null) &&
+  assert_eq "$(git -C "$T/wt dev" rev-parse HEAD)" "$(git -C "$T/remote.git" rev-parse develop)" &&
+  assert_eq "$(git -C "$T/wt dev" status --porcelain)" ""
+}
+test_ff_linked_worktree_dirty() {
+  ffsetup && (cd "$WORK" && gs config sync.branches develop && gs config sync.ffCheckedOut true) &&
+  git -C "$WORK" worktree add -q "$T/wt" develop &&
+  (cd "$T/pusher" && git checkout -q develop && echo x > tracked && git add tracked && git commit -qm t && git push -q origin develop) &&
+  git -C "$T/wt" pull -q && echo y > "$T/wt/tracked" && push_commit develop d3 &&
+  { (cd "$WORK" && gs sync >/dev/null); assert_eq $? 1; } &&
+  assert_contains "$(blockers)" "develop:dirty 1 tracked files changed in $T/wt"
+}
+test_ff_mid_rebase_blocked() {
+  # develop == origin/develop (no local commits), stopped mid interactive rebase via `break`.
+  ffsetup && (cd "$WORK" && gs config sync.branches develop) &&
+  git -C "$WORK" checkout -q develop &&
+  quiet sh -c 'cd "$1" && GIT_SEQUENCE_EDITOR="printf \"break\\n\" >" git rebase -i HEAD' _ "$WORK" &&
+  git -C "$WORK" status | grep -q "rebase in progress" &&
+  before=$(git -C "$WORK" rev-parse refs/heads/develop) && push_commit develop d2 &&
+  quiet "$GS" sync --all &&
+  assert_eq "$(git -C "$WORK" rev-parse refs/heads/develop)" "$before" &&
+  assert_contains "$(blockers)" "develop:ff-failed"
+}
+test_ff_skips_branch_of_failed_remote() {
+  ffsetup && git -C "$WORK" checkout -q -b scratch &&
+  git -C "$WORK" remote add dead "$T/dead.git" && git init -q --bare "$T/dead.git" &&
+  (cd "$T/pusher" && git push -q "$T/dead.git" develop:develop) && git -C "$WORK" fetch -q dead &&
+  git -C "$WORK" branch -q --track dd dead/develop && rm -rf "$T/dead.git" &&
+  (cd "$WORK" && gs config sync.branches "dd main") && push_commit main m2 &&
+  { (cd "$WORK" && gs sync >/dev/null); assert_eq $? 1; } &&
+  assert_eq "$(git -C "$WORK" rev-parse main)" "$(git -C "$T/remote.git" rev-parse main)" &&
+  assert_contains "$(blockers)" "fetch-failed:dead" && assert_not_contains "$(blockers)" "dd:"
+}
+test_ff_path_with_spaces() {
+  ffsetup "space dir" && git -C "$WORK" checkout -q develop && push_commit main m2 &&
+  (cd "$WORK" && gs sync >/dev/null) &&
+  assert_eq "$(git -C "$WORK" rev-parse main)" "$(git -C "$T/remote.git" rev-parse main)"
+}
+test_ff_mode_fetch_only_does_not_ff() {
+  ffsetup && git -C "$WORK" checkout -q develop && (cd "$WORK" && gs config sync.mode maintain-and-fetch) &&
+  before=$(git -C "$WORK" rev-parse main) && push_commit main m2 && (cd "$WORK" && gs sync >/dev/null) &&
+  assert_eq "$(git -C "$WORK" rev-parse main)" "$before"
+}
+test_sync_all_stdin_not_consumed() {
+  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null &&
+  git clone -q "$T/remote.git" "$T/work2" && gs install "$T/work2" >/dev/null &&
+  gs sync --all >/dev/null &&
+  assert_file "$(sf_of "$WORK")" && assert_file "$(sf_of "$T/work2")"
+}
+
 # --- runner ---
 if [ $# -gt 0 ]; then TESTS="$*"; else
   TESTS=$(grep -E '^test_[a-z0-9_]+\(\)' "$0" | sed 's/().*//')
