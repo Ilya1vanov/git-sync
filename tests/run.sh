@@ -420,6 +420,16 @@ test_ff_mid_rebase_blocked() {
   assert_eq "$(git -C "$WORK" rev-parse refs/heads/develop)" "$before" &&
   assert_contains "$(blockers)" "develop:ff-failed"
 }
+test_ff_bisect_blocked() {
+  ffsetup && (cd "$WORK" && gs config sync.branches develop) &&
+  git -C "$WORK" checkout -q develop && quiet git -C "$WORK" bisect start &&
+  git -C "$WORK" checkout -q --detach && [ -f "$WORK/.git/BISECT_START" ] &&
+  assert_eq "$(cat "$WORK/.git/BISECT_START")" develop &&
+  before=$(git -C "$WORK" rev-parse refs/heads/develop) && push_commit develop d2 &&
+  { (cd "$WORK" && gs sync >/dev/null); assert_eq $? 1; } &&
+  assert_eq "$(git -C "$WORK" rev-parse refs/heads/develop)" "$before" &&
+  assert_contains "$(blockers)" "develop:ff-failed branch is being rebased/bisected"
+}
 test_ff_skips_branch_of_failed_remote() {
   ffsetup && git -C "$WORK" checkout -q -b scratch &&
   git -C "$WORK" remote add dead "$T/dead.git" && git init -q --bare "$T/dead.git" &&

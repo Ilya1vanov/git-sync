@@ -377,6 +377,27 @@ ff_inprogress() {
   return 1
 }
 
+# ff_being_rebased REPO BRANCH: rc 0 if any worktree is rebasing/bisecting BRANCH.
+ff_being_rebased() {
+  local repo=$1 b=$2 w f p v wts
+  wts=$(git -C "$repo" worktree list --porcelain 2>/dev/null | sed -n 's/^worktree //p')
+  while IFS= read -r w; do
+    [ -n "$w" ] || continue
+    for f in rebase-merge/head-name rebase-apply/head-name BISECT_START; do
+      p=$(git -C "$w" rev-parse --git-path "$f" 2>/dev/null) || continue
+      case "$p" in /*) ;; *) p="$w/$p" ;; esac
+      [ -f "$p" ] || continue
+      v=$(sed -n 1p "$p" 2>/dev/null)
+      if [ "$v" = "refs/heads/$b" ] || { [ "$f" = BISECT_START ] && [ "$v" = "$b" ]; }; then
+        return 0
+      fi
+    done
+  done <<EOF
+$wts
+EOF
+  return 1
+}
+
 # sync_ff REPO: fast-forward configured/default branches (spec "Sync algorithm" step 2).
 sync_ff() {
   local repo=$1 b u remote old new w err name n ffco branches
@@ -410,11 +431,15 @@ sync_ff() {
         add_blocker "$b:dirty" "$n tracked files changed in $w"
         continue
       fi
-      if ! err=$(git -C "$w" merge --ff-only --quiet "$new" 2>&1); then
+      if ! err=$(git -C "$w" merge --ff-only --no-autostash --quiet "$new" 2>&1); then
         add_blocker "$b:ff-failed" "$(first_line "$err")"
         continue
       fi
     else
+      if ff_being_rebased "$repo" "$b"; then
+        add_blocker "$b:ff-failed" "branch is being rebased/bisected"
+        continue
+      fi
       if ! err=$(git -C "$repo" fetch --quiet . "$u:refs/heads/$b" 2>&1); then
         add_blocker "$b:ff-failed" "$(first_line "$err")"
         continue
