@@ -6,7 +6,7 @@ selected local branches, but only when that is safe. It never merges, rebases,
 resets, stashes or commits. Anything that would need judgment is recorded as a
 *blocker* and left alone.
 
-Requirements: macOS, git >= 2.30. It is a single POSIX `sh` file with no other
+Requirements: macOS, git >= 2.31. It is a single POSIX `sh` file with no other
 dependencies.
 
 ## Install
@@ -34,10 +34,18 @@ Set per repo (`git-sync config sync.mode <mode>`) or globally with `--global`.
 
 Branches to fast-forward: `sync.branches` if set, else the branch
 `origin/HEAD` points to, else the first of `develop main master` that exists
-locally. A branch needs an upstream to be updated. A branch that is checked
-out in a worktree is skipped (reported as a note) unless `sync.ffCheckedOut`
-is `true`. Then it is fast-forwarded in place, provided its worktree is clean
-and not mid-merge/rebase/etc.; otherwise it is a blocker.
+locally. A branch needs an upstream to be updated. A branch that is only
+ahead of its upstream (local commits, nothing new upstream) is left alone and
+reported as a note (`develop: ahead 1 (not pushed)`). A branch that is both
+ahead and behind has diverged and is a blocker, checked out or not. A
+checked-out branch that could fast-forward is skipped (reported as a note)
+unless `sync.ffCheckedOut` is `true`. Then it is fast-forwarded in place,
+provided its worktree is clean and not mid-merge/rebase/etc.; otherwise it is
+a blocker.
+
+Caution: with `sync.ffCheckedOut=true` the in-place fast-forward is a real
+`git merge --ff-only`, so the repo's `post-merge` hook runs unattended under
+launchd (no terminal, launchd's environment).
 
 ## Configuration
 
@@ -91,18 +99,24 @@ Result per repo: `ok`, `blocked` (at least one blocker), `error`, `missing`
 |---|---|
 | `<branch>:dirty` | Checked-out branch's worktree has modified tracked files (`ffCheckedOut=true`). |
 | `<branch>:in-progress` | Merge, rebase, cherry-pick, revert or bisect in that worktree (`ffCheckedOut=true`). |
-| `<branch>:diverged` | Local branch has commits not on its upstream, so it cannot fast-forward. |
+| `<branch>:diverged` | Local branch is both ahead of and behind its upstream, so it cannot fast-forward. (Ahead only is a note, not a blocker.) |
 | `<branch>:ff-failed` | Git refused the fast-forward (for example mid-rebase, an untracked file in the way, `index.lock`). |
 | `fetch-failed:<remote>` | `git fetch` failed for that remote. Branches tracking it are skipped. |
 | `maintenance:failed` | `git maintenance run` failed. |
 | `repo:invalid` | The path exists but is not a git repository (result `error`). |
 
-Checked-out branches with `ffCheckedOut=false` are reported as notes
-(`main: skipped (checked out)`), not blockers. Blockers clear on their own the
+Checked-out branches that could fast-forward with `ffCheckedOut=false`, and
+branches that are only ahead of their upstream, are reported as notes
+(`main: skipped (checked out)`, `develop: ahead 1 (not pushed)`), not
+blockers. Blockers clear on their own the
 next time the condition is gone.
 
 Fetches run non-interactively (`GIT_TERMINAL_PROMPT=0`, ssh `BatchMode=yes`),
-so credential prompts fail the fetch instead of hanging.
+so credential prompts fail the fetch instead of hanging. Stalled transfers
+also fail instead of hanging: ssh gets `ConnectTimeout=30` and
+`ServerAliveInterval=15`/`ServerAliveCountMax=3`, and http fetches abort below
+1000 B/s for 60s. A repo's own `core.sshCommand` or a caller-set
+`GIT_SSH_COMMAND` is respected (and then these ssh options are not added).
 
 ## Maintenance
 
