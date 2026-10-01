@@ -16,6 +16,7 @@ sh install.sh          # copies git-sync to ${PREFIX:-$HOME/.local/bin}
 git-sync init          # creates ~/.git-sync with default config
 cd /path/to/repo
 git-sync install       # register the repo (repeat per repo)
+git-sync install -r ~/projects   # or: register every repo directly inside a folder
 git-sync start         # write the LaunchAgent and load it
 ```
 
@@ -70,12 +71,15 @@ git-sync config --unset sync.mode                 # revert to the next level
 ```
 
 `sync.repo` (the repo list) is managed only by `install`/`uninstall`.
+`install -r <dir>` registers each immediate subdirectory of `<dir>` that is a
+git working tree (depth 1, hidden folders skipped); linked worktrees resolve to
+their main worktree, so they are counted as already installed.
 Unknown keys are rejected unless `--force` is given.
 
 ## Commands
 
 ```
-git-sync init | install [<path>] | uninstall [<path>] | list | status
+git-sync init | install [<path>] | install -r <dir> | uninstall [<path>] | list | status
 git-sync start | stop
 git-sync config [--global] [--force] [--unset] [<key> [<value>]]
 git-sync sync [--all]

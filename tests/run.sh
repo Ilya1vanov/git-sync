@@ -558,6 +558,34 @@ test_job_mode_quiet_stdout() {
   gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null &&
   out=$(gs sync --all --job 2>/dev/null) && assert_eq "$out" ""
 }
+test_install_recursive_depth1() {
+  gs init >/dev/null && make_repos && mkdir -p "$T/projects/plain" "$T/projects/deep/inner" &&
+  git clone -q "$T/remote.git" "$T/projects/a" && git clone -q "$T/remote.git" "$T/projects/b c" &&
+  git clone -q "$T/remote.git" "$T/projects/deep/inner/x" &&
+  gs install "$T/projects/a" >/dev/null &&
+  out=$(gs install -r "$T/projects") &&
+  assert_contains "$out" "Already installed: $T/projects/a" &&
+  assert_contains "$out" "Installed: $T/projects/b c" &&
+  assert_contains "$out" "1 installed, 1 already installed, 0 failed" &&
+  assert_eq "$(gs list | wc -l | tr -d ' ')" 2 &&
+  assert_not_contains "$(gs list)" "inner"
+}
+test_install_recursive_skips_linked_worktree_dup() {
+  gs init >/dev/null && make_repos && mkdir "$T/projects" &&
+  git clone -q "$T/remote.git" "$T/projects/a" &&
+  git -C "$T/projects/a" worktree add -q "$T/projects/a-wt" -b feature &&
+  out=$(gs install -r "$T/projects" 2>/dev/null) &&
+  assert_contains "$out" "1 installed, 1 already installed, 0 failed" &&
+  assert_eq "$(git config -f "$GIT_SYNC_HOME/config" --get-all sync.repo)" "$T/projects/a"
+}
+test_install_recursive_no_repos_and_bad_dir() {
+  gs init >/dev/null && mkdir "$T/empty" &&
+  { gs install -r "$T/empty" 2>"$T/err"; assert_eq $? 1; } &&
+  assert_contains "$(cat "$T/err")" "no git repositories found in $T/empty" &&
+  { gs install -r "$T/nope" 2>"$T/err"; assert_eq $? 1; } &&
+  assert_contains "$(cat "$T/err")" "not a directory: $T/nope" &&
+  { gs install -r 2>/dev/null; assert_eq $? 2; }
+}
 
 # --- runner ---
 if [ $# -gt 0 ]; then TESTS="$*"; else
