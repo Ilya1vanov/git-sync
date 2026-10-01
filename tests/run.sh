@@ -65,7 +65,11 @@ push_commit() {
   ( cd "$T/pusher" && git checkout -q "$1" && git commit -q --allow-empty -m "${2:-c}" && git push -q origin "$1" ) || exit 1
 }
 
-gs() { "$GS" "$@"; }
+# After `init`, sync.jitter is set to 0 so parallel test runs don't sleep.
+gs() {
+  "$GS" "$@" || return
+  if [ "${1:-}" = init ]; then git config -f "$GIT_SYNC_HOME/config" sync.jitter 0; fi
+}
 # quiet CMD...: run, discard output, always succeed (for steps whose exit code is not under test).
 quiet() { "$@" >/dev/null 2>&1; return 0; }
 
@@ -629,7 +633,7 @@ test_notify_one_per_run_combined() {
   git clone -q "$T/remote.git" "$T/other" && gs install "$T/other" >/dev/null &&
   git -C "$T/other" remote add dead "$T/nope.git" &&
   quiet "$GS" sync --all --job &&
-  assert_eq "$(ncalls)" "git-sync: 2 repos newly blocked|work: fetch-failed:dead; other: fetch-failed:dead — 2 repos: 0 ok, 2 blocked, 0 failed" &&
+  assert_eq "$(ncalls)" "git-sync: 2 repos newly blocked|other: fetch-failed:dead; work: fetch-failed:dead — 2 repos: 0 ok, 2 blocked, 0 failed" &&
   # next run: nothing new, only the summary
   quiet "$GS" sync --all --job &&
   assert_eq "$(ncalls | wc -l | tr -d ' ')" 2 &&
@@ -673,6 +677,64 @@ test_install_recursive_no_repos_and_bad_dir() {
   { gs install -r "$T/nope" 2>"$T/err"; assert_eq $? 1; } &&
   assert_contains "$(cat "$T/err")" "not a directory: $T/nope" &&
   { gs install -r 2>/dev/null; assert_eq $? 2; }
+}
+test_config_jobs_jitter() {
+  "$GS" init >/dev/null &&
+  assert_eq "$(gs config sync.jobs)" 8 && assert_eq "$(gs config sync.jitter)" 5s &&
+  gs config --global sync.jobs 1 && gs config --global sync.jobs 64 &&
+  gs config --global sync.jitter 0 && gs config --global sync.jitter 60s && gs config --global sync.jitter 7 &&
+  { gs config --global sync.jobs 0 2>/dev/null; [ $? -ne 0 ]; } &&
+  { gs config --global sync.jobs 65 2>/dev/null; [ $? -ne 0 ]; } &&
+  { gs config --global sync.jobs x 2>/dev/null; [ $? -ne 0 ]; } &&
+  { gs config --global sync.jitter 61 2>/dev/null; [ $? -ne 0 ]; } &&
+  { gs config --global sync.jitter 5m 2>/dev/null; [ $? -ne 0 ]; } &&
+  make_repos && cd "$WORK" &&
+  { gs config sync.jobs 4 2>/dev/null; assert_eq $? 2; }
+}
+# make_many N: N clones of remote.git installed as $T/r1..$T/rN
+make_many() {
+  local i=1
+  while [ "$i" -le "$1" ]; do
+    git clone -q "$T/remote.git" "$T/r$i" && git -C "$T/r$i" branch -q --track develop origin/develop &&
+      gs install "$T/r$i" >/dev/null || return 1
+    i=$((i + 1))
+  done
+}
+test_sync_parallel_all_repos() {
+  gs init >/dev/null && gs config --global sync.jobs 4 && gs config --global sync.branches develop &&
+  make_repos && make_many 6 &&
+  git -C "$T/r3" remote add dead "$T/nope.git" && push_commit develop d2 &&
+  { gs sync --all >"$T/out" 2>&1; assert_eq $? 1; } &&
+  assert_eq "$(grep -c ': ok$' "$T/out")" 5 &&
+  assert_contains "$(cat "$T/out")" "$T/r3: blocked (fetch-failed:dead)" &&
+  assert_contains "$(cat "$GIT_SYNC_HOME/git-sync.log")" "run end: 5 ok, 1 blocked, 0 failed" &&
+  for i in 1 2 4 5 6; do
+    assert_eq "$(git -C "$T/r$i" rev-parse develop)" "$(git -C "$T/remote.git" rev-parse develop)" || return 1
+    assert_eq "$(sget "$T/r$i" result)" ok || return 1
+  done &&
+  ! ls "$GIT_SYNC_HOME" | grep -q '^run\.' && [ ! -d "$GIT_SYNC_HOME/lock" ]
+}
+test_sync_parallel_jobs1_and_missing() {
+  gs init >/dev/null && gs config --global sync.jobs 1 && make_repos && make_many 3 &&
+  rm -rf "$T/r2" &&
+  { gs sync --all >"$T/out" 2>&1; assert_eq $? 1; } &&
+  assert_eq "$(cat "$T/out" | wc -l | tr -d ' ')" 3 &&
+  assert_contains "$(cat "$T/out")" "$T/r2: missing" &&
+  assert_contains "$(cat "$GIT_SYNC_HOME/git-sync.log")" "run end: 2 ok, 0 blocked, 1 failed"
+}
+test_sync_jitter_applies_to_all_only() {
+  gs init >/dev/null && gs config --global sync.jitter 3 && make_repos && gs install "$WORK" >/dev/null &&
+  start=$(date +%s) && (cd "$WORK" && gs sync >/dev/null) &&
+  [ $(( $(date +%s) - start )) -lt 3 ] &&
+  gs config --global sync.jitter 0 && start=$(date +%s) && gs sync --all >/dev/null &&
+  [ $(( $(date +%s) - start )) -lt 3 ]
+}
+test_stale_runfile_removed() {
+  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null &&
+  printf 'ok\t-\t/ghost\n' > "$GIT_SYNC_HOME/run.99999" &&
+  gs sync --all >/dev/null &&
+  assert_contains "$(cat "$GIT_SYNC_HOME/git-sync.log")" "run end: 1 ok, 0 blocked, 0 failed" &&
+  assert_no_file "$GIT_SYNC_HOME/run.99999"
 }
 
 # --- runner ---

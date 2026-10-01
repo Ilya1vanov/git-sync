@@ -34,7 +34,7 @@ require_init() {
 # ---- config ----
 cfg_known() {
   case "$1" in
-    sync.period|sync.repo|sync.mode|sync.branches|sync.ffCheckedOut|log.maxSize|notify.enabled|notify.events) return 0 ;;
+    sync.period|sync.repo|sync.mode|sync.branches|sync.ffCheckedOut|sync.jobs|sync.jitter|log.maxSize|notify.enabled|notify.events) return 0 ;;
   esac
   return 1
 }
@@ -45,6 +45,8 @@ cfg_default() {
     sync.mode) echo fast-forward ;;
     sync.branches) echo "" ;;
     sync.ffCheckedOut) echo false ;;
+    sync.jobs) echo 8 ;;
+    sync.jitter) echo 5s ;;
     log.maxSize) echo 3M ;;
     notify.enabled) echo false ;;
     notify.events) echo blocked ;;
@@ -147,6 +149,14 @@ validate_value() {
         true|false) ;;
         *) echo "git-sync: $key must be true or false" >&2; return 1 ;;
       esac ;;
+    sync.jobs)
+      if ! printf '%s' "$v" | grep -Eq '^[1-9][0-9]?$' || [ "$v" -gt 64 ]; then
+        echo "git-sync: sync.jobs must be a number from 1 to 64" >&2; return 1
+      fi ;;
+    sync.jitter)
+      if ! printf '%s' "$v" | grep -Eq '^[0-9]+s?$' || [ "${v%s}" -gt 60 ]; then
+        echo "git-sync: sync.jitter must be 0-60 seconds, e.g. 5s or 0" >&2; return 1
+      fi ;;
     log.maxSize)
       if ! printf '%s' "$v" | grep -Eq '^[1-9][0-9]*[KMG]?$'; then
         echo "git-sync: log.maxSize must look like 3M, 512K, 1G or a byte count" >&2; return 1
@@ -502,6 +512,7 @@ status_write() {
   git config -f "$tmp" status.path "$repo"
   git config -f "$tmp" status.mode "$mode"
   git config -f "$tmp" status.lastRun "$(now)"
+  git config -f "$tmp" status.lastRunEpoch "$(date +%s)"
   [ -z "$last" ] || git config -f "$tmp" status.lastSuccess "$last"
   git config -f "$tmp" status.result "$SYNC_RESULT"
   if [ -n "$SYNC_BLOCKERS" ]; then
@@ -551,10 +562,47 @@ sync_repo() {
   if [ "$listed" = 1 ]; then
     SYNC_PREV_KEYS=$(git config -f "$(status_file "$repo")" --get-all status.blocker 2>/dev/null | awk '{print $1}')
     status_write "$repo" "$mode"
-    if command -v notify_repo >/dev/null 2>&1; then notify_repo "$repo"; fi
   fi
   log_msg INFO "$repo: $SYNC_RESULT"
   return 0
+}
+
+# sync_one_report REPO LISTED RUNFILE: sync one repo, print its summary line
+# (manual runs only) and append "<result>\t<new blocker keys>\t<repo>" to
+# RUNFILE as one write, so parallel workers never interleave within a line.
+# Blocker keys never contain tabs, so the tab separator is safe.
+sync_one_report() {
+  local repo=$1 keys new
+  SYNC_PREV_KEYS=
+  sync_repo "$repo" "$2" </dev/null
+  if [ "$GS_JOB" = 0 ]; then
+    keys=$(blocker_keys | paste -sd, -)
+    if [ -n "$keys" ]; then
+      printf '%s: %s (%s)\n' "$repo" "$SYNC_RESULT" "$keys"
+    else
+      printf '%s: %s\n' "$repo" "$SYNC_RESULT"
+    fi
+  fi
+  new=$(new_blocker_keys)
+  # "-" stands for "no new keys": tab is IFS whitespace, so an empty middle
+  # field would be swallowed by `read`.
+  printf '%s\t%s\t%s\n' "$SYNC_RESULT" "${new:--}" "$repo" >> "$3"
+}
+
+# jitter_sleep: wait a random 0..sync.jitter seconds (fractional).
+jitter_sleep() {
+  local max
+  max=$(cfg_get sync.jitter)
+  max=${max%s}
+  [ "$max" -gt 0 ] 2>/dev/null || return 0
+  sleep "$(awk -v m="$max" -v s="$$" 'BEGIN { srand(s); printf "%.2f", rand() * m }')"
+}
+
+# cmd___sync_one JOB RUNFILE REPO: xargs worker for parallel `sync --all`.
+cmd___sync_one() {
+  GS_JOB=$1
+  jitter_sleep
+  sync_one_report "$3" 1 "$2"
 }
 
 # ---- agent ----
@@ -631,18 +679,25 @@ notify_wanted() {
 NOTIFY_NEW_BLOCKED=   # "; "-separated "<repo>: <key>, <key>"
 NOTIFY_NEW_COUNT=0
 
-notify_repo() {
+# new_blocker_keys: comma-separated blocker keys of the repo just synced that
+# were not in its previous status file (SYNC_PREV_KEYS); empty if none.
+new_blocker_keys() {
   local k new=
-  notify_wanted blocked || return 0
   for k in $(blocker_keys); do
     if ! printf '%s\n' "$SYNC_PREV_KEYS" | grep -qxF -- "$k"; then
       new=${new:+$new, }$k
     fi
   done
-  [ -n "$new" ] || return 0
+  printf '%s' "$new"
+}
+
+# notify_collect REPO NEW_KEYS: remember a newly blocked repo for notify_run_end.
+notify_collect() {
+  [ -n "$2" ] || return 0
+  notify_wanted blocked || return 0
   NOTIFY_NEW_COUNT=$((NOTIFY_NEW_COUNT + 1))
-  NOTIFY_NEW_BLOCKED=${NOTIFY_NEW_BLOCKED:+$NOTIFY_NEW_BLOCKED; }"$(basename "$1"): $new"
-  NOTIFY_LAST_REPO=$(basename "$1") NOTIFY_LAST_KEYS=$new
+  NOTIFY_NEW_BLOCKED=${NOTIFY_NEW_BLOCKED:+$NOTIFY_NEW_BLOCKED; }"$(basename "$1"): $2"
+  NOTIFY_LAST_REPO=$(basename "$1") NOTIFY_LAST_KEYS=$2
   return 0
 }
 
@@ -698,6 +753,8 @@ cmd_init() {
   git config -f "$GS_CONFIG" sync.period 20m &&
   git config -f "$GS_CONFIG" sync.mode fast-forward &&
   git config -f "$GS_CONFIG" sync.ffCheckedOut false &&
+  git config -f "$GS_CONFIG" sync.jobs 8 &&
+  git config -f "$GS_CONFIG" sync.jitter 5s &&
   git config -f "$GS_CONFIG" log.maxSize 3M &&
   git config -f "$GS_CONFIG" notify.enabled false &&
   git config -f "$GS_CONFIG" notify.events blocked ||
@@ -796,7 +853,7 @@ cmd_list() {
 }
 
 cmd_sync() {
-  local all=0 repo n=0 ok=0 blocked=0 failed=0 rc=0 keys line entries listed path=
+  local all=0 repo n=0 ok=0 blocked=0 failed=0 rc=0 keys line entries listed path= runfile result
   while [ $# -gt 0 ]; do
     case "$1" in
       --all) all=1 ;;
@@ -836,25 +893,34 @@ cmd_sync() {
   else
     listed=1
   fi
-  while IFS= read -r line; do
-    [ -n "$line" ] || continue
-    sync_repo "$line" "$listed" </dev/null
-    if [ "$GS_JOB" = 0 ]; then
-      keys=$(blocker_keys | paste -sd, -)
-      if [ -n "$keys" ]; then
-        printf '%s: %s (%s)\n' "$line" "$SYNC_RESULT" "$keys"
-      else
-        printf '%s: %s\n' "$line" "$SYNC_RESULT"
-      fi
-    fi
-    case "$SYNC_RESULT" in
+  # The lock guarantees no other run; leftovers are from a killed run.
+  rm -f "$GS_HOME"/run.*
+  runfile="$GS_HOME/run.$$"
+  : > "$runfile" || die "cannot write $runfile"
+  if [ "$all" = 1 ]; then
+    # Parallel: up to sync.jobs workers, each after a random jitter delay.
+    printf '%s\n' "$entries" | grep . | tr '\n' '\0' |
+      xargs -0 -n 1 -P "$(cfg_get sync.jobs)" "$(self_path)" __sync-one "$GS_JOB" "$runfile"
+  else
+    sync_one_report "$repo" "$listed" "$runfile"
+  fi
+  while IFS="$(printf '\t')" read -r result keys line; do
+    case "$result" in
       ok) ok=$((ok + 1)) ;;
       blocked) blocked=$((blocked + 1)); rc=1 ;;
       *) failed=$((failed + 1)); rc=1 ;;
     esac
+    [ "$keys" != - ] || keys=
+    notify_collect "$line" "$keys"
   done <<EOF
-$entries
+$(sort -t "$(printf '\t')" -k3 "$runfile")
 EOF
+  rm -f "$runfile"
+  # A worker that died without reporting counts as failed.
+  if [ $((ok + blocked + failed)) -lt "$n" ]; then
+    log_msg ERROR "$((n - ok - blocked - failed)) repo(s) did not report a result"
+    failed=$((n - ok - blocked)); rc=1
+  fi
   log_msg INFO "run end: $ok ok, $blocked blocked, $failed failed"
   if command -v notify_run_end >/dev/null 2>&1; then notify_run_end "$ok" "$blocked" "$failed"; fi
   return "$rc"
@@ -883,7 +949,7 @@ cmd_config() {
 
   if [ "$nargs" -eq 0 ]; then
     [ "$unset" -eq 0 ] || usage_die "--unset requires a key"
-    for k in sync.period sync.mode sync.branches sync.ffCheckedOut log.maxSize notify.enabled notify.events; do
+    for k in sync.period sync.mode sync.branches sync.ffCheckedOut sync.jobs sync.jitter log.maxSize notify.enabled notify.events; do
       v=$(cfg_get "$k" "$repo")
       src=$(cfg_source "$k" "$repo")
       if [ "$src" = default ] && [ "$k" = sync.branches ]; then
@@ -1110,7 +1176,7 @@ cmd_status() {
 cmd=${1:-help}
 case "$cmd" in
   help|-h|--help|init) ;;
-  install|uninstall|list|status|start|stop|config|sync|notifications) require_init ;;
+  install|uninstall|list|status|start|stop|config|sync|notifications|__sync-one) require_init ;;
 esac
 case "$cmd" in
   help|-h|--help) cmd_help ;;
@@ -1123,6 +1189,7 @@ case "$cmd" in
   stop) shift; cmd_stop "$@" ;;
   config) shift; cmd_config "$@" ;;
   sync) shift; cmd_sync "$@" ;;
+  __sync-one) shift; cmd___sync_one "$@" ;;
   notifications) shift; cmd_notifications "$@" ;;
   *) usage_die "unknown command: $cmd" ;;
 esac
