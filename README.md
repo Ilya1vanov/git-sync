@@ -80,7 +80,7 @@ Unknown keys are rejected unless `--force` is given.
 
 ```
 git-sync init | install [<path>] | install -r <dir> | uninstall [<path>] | list
-git-sync status [--verbose]
+git-sync status [--verbose] [--blocked-first]
 git-sync start | stop
 git-sync config [--global] [--force] [--unset] [<key> [<value>]]
 git-sync sync [--all]
@@ -139,6 +139,8 @@ git-sync status            # agent state, period, notifications, then per repo:
                            #   (or notes) on a second line when there are any
 git-sync status --verbose  # full per-repo detail: mode, last run/success,
                            #   every blocker with its detail, every note
+git-sync status -b         # repos needing attention first: blocked, error,
+                           #   missing, then the rest (combines with -v)
 git-sync list              # one line per repo: path, mode, last result
 ```
 

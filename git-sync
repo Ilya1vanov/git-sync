@@ -658,7 +658,8 @@ Commands:
   install -r <dir>             Add every repo directly inside <dir> (depth 1)
   uninstall [<path>]           Remove a repo from the sync list
   list                         List synced repos
-  status [--verbose]           Show agent state and per-repo sync status
+  status [--verbose] [--blocked-first]
+                               Show agent state and per-repo sync status
   start                        Install and load the launchd agent
   stop                         Unload and remove the launchd agent
   config [--global] [--force] [--unset] [<key> [<value>]]
@@ -992,14 +993,39 @@ status_compact_repo() {
   [ -z "$notes" ] || echo "           note: $notes"
 }
 
+# status_repos BLOCKED_FIRST: listed repos, one per line. With 1, repos needing
+# attention come first (blocked, then error, then missing); order is otherwise
+# the list order.
+status_repos() {
+  local repo rank i=0
+  if [ "$1" -eq 0 ]; then
+    list_repos
+    return 0
+  fi
+  list_repos | while IFS= read -r repo; do
+    i=$((i + 1))
+    if [ ! -d "$repo" ]; then rank=2
+    else
+      case "$(status_field "$repo" result)" in
+        blocked) rank=0 ;;
+        error) rank=1 ;;
+        *) rank=3 ;;
+      esac
+    fi
+    printf '%s\t%s\t%s\n' "$rank" "$i" "$repo"
+  done | sort -t "$(printf '\t')" -k1,1n -k2,2n | cut -f3-
+}
+
 cmd_status() {
-  local repo first=1 v verbose=0
-  case "${1:-}" in
-    "") ;;
-    -v|--verbose) verbose=1 ;;
-    *) usage_die "unknown option for status: $1" ;;
-  esac
-  [ $# -le 1 ] || usage_die "usage: git-sync status [--verbose]"
+  local repo first=1 v verbose=0 blocked_first=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -v|--verbose) verbose=1 ;;
+      -b|--blocked-first) blocked_first=1 ;;
+      *) usage_die "unknown option for status: $1" ;;
+    esac
+    shift
+  done
   if agent_loaded; then echo "Agent:         loaded"; else echo "Agent:         not loaded"; fi
   echo "Period:        $(cfg_get sync.period)"
   if [ "$(cfg_get notify.enabled)" = true ]; then
@@ -1012,10 +1038,10 @@ cmd_status() {
     return 0
   fi
   if [ "$verbose" -eq 0 ]; then
-    list_repos | while IFS= read -r repo; do status_compact_repo "$repo"; done
+    status_repos "$blocked_first" | while IFS= read -r repo; do status_compact_repo "$repo"; done
     return 0
   fi
-  list_repos | while IFS= read -r repo; do
+  status_repos "$blocked_first" | while IFS= read -r repo; do
     [ "$first" -eq 1 ] || echo
     first=0
     echo "$repo"

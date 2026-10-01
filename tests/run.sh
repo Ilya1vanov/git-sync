@@ -542,6 +542,22 @@ test_status_compact() {
   # header (3) + work (2) + other (2) + gone (1) + fresh (1)
   assert_eq "$(printf '%s\n' "$out" | wc -l | tr -d ' ')" 9
 }
+test_status_blocked_first() {
+  gs init >/dev/null && make_repos &&
+  git clone -q "$T/remote.git" "$T/a" && gs install "$T/a" >/dev/null &&
+  git clone -q "$T/remote.git" "$T/b" && gs install "$T/b" >/dev/null &&
+  git clone -q "$T/remote.git" "$T/gone" && gs install "$T/gone" >/dev/null &&
+  git clone -q "$T/remote.git" "$T/c" && gs install "$T/c" >/dev/null &&
+  git -C "$T/c" remote add dead "$T/nope.git" && quiet "$GS" sync --all && rm -rf "$T/gone" &&
+  # default keeps list order: a, b, gone, c
+  order=$(gs status | sed -n 's/^[a-z]* *\(\/[^ ]*\).*/\1/p' | tr '\n' ' ') &&
+  assert_eq "$order" "$T/a $T/b $T/gone $T/c " &&
+  # blocked first, then error, then missing, then the rest in list order
+  order=$(gs status --blocked-first | sed -n 's/^[a-z]* *\(\/[^ ]*\).*/\1/p' | tr '\n' ' ') &&
+  assert_eq "$order" "$T/c $T/gone $T/a $T/b " &&
+  out=$(gs status -b --verbose) && assert_eq "$(printf '%s\n' "$out" | sed -n '4p')" "$T/c" &&
+  out=$(gs status --verbose -b) && assert_eq "$(printf '%s\n' "$out" | sed -n '4p')" "$T/c"
+}
 test_status_compact_tilde_and_bad_flag() {
   gs init >/dev/null && git init -q "$HOME/proj" && gs install "$HOME/proj" >/dev/null &&
   assert_contains "$(gs status)" "never    ~/proj" &&
