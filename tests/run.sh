@@ -729,6 +729,21 @@ test_sync_jitter_applies_to_all_only() {
   gs config --global sync.jitter 0 && start=$(date +%s) && gs sync --all >/dev/null &&
   [ $(( $(date +%s) - start )) -lt 3 ]
 }
+test_status_tricky_values() {
+  gs init >/dev/null && make_repos "sp ace" && gs install "$WORK" >/dev/null && quiet "$GS" sync --all &&
+  sf=$(sf_of "$WORK") &&
+  git config -f "$sf" status.result blocked &&
+  git config -f "$sf" --add status.blocker 'main:ff-failed fatal: "x" = y; #z \ end' &&
+  git config -f "$sf" --add status.blocker 'fetch-failed:origin  two  spaces' &&
+  out=$(gs status -v) &&
+  assert_contains "$out" '  blocker:       main:ff-failed fatal: "x" = y; #z \ end' &&
+  assert_contains "$out" '  blocker:       fetch-failed:origin  two  spaces' &&
+  out=$(gs status) &&
+  assert_contains "$out" "blocked  < 1m ago       $WORK" &&
+  assert_contains "$out" "blocked by: main:ff-failed, fetch-failed:origin" &&
+  git config -f "$sf" status.lastRun garbage &&
+  assert_contains "$(gs status)" "blocked  unknown        $WORK"
+}
 test_stale_runfile_removed() {
   gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null &&
   printf 'ok\t-\t/ghost\n' > "$GIT_SYNC_HOME/run.99999" &&

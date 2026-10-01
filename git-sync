@@ -512,7 +512,6 @@ status_write() {
   git config -f "$tmp" status.path "$repo"
   git config -f "$tmp" status.mode "$mode"
   git config -f "$tmp" status.lastRun "$(now)"
-  git config -f "$tmp" status.lastRunEpoch "$(date +%s)"
   [ -z "$last" ] || git config -f "$tmp" status.lastSuccess "$last"
   git config -f "$tmp" status.result "$SYNC_RESULT"
   if [ -n "$SYNC_BLOCKERS" ]; then
@@ -1055,70 +1054,130 @@ cmd_notifications() {
   fi
 }
 
-# time_ago ISO-TIMESTAMP: "< 1m ago", "5 minutes ago", "1 hour ago", "3 days ago";
-# "never" when empty, "unknown" when unparsable.
-time_ago() {
-  local then secs n unit
-  [ -n "$1" ] || { echo never; return 0; }
-  then=$(date -j -f '%Y-%m-%dT%H:%M:%S%z' "$1" +%s 2>/dev/null) || { echo unknown; return 0; }
-  secs=$(( $(date +%s) - then ))
-  if [ "$secs" -lt 60 ]; then echo "< 1m ago"; return 0
-  elif [ "$secs" -lt 3600 ]; then n=$((secs / 60)); unit=minute
-  elif [ "$secs" -lt 86400 ]; then n=$((secs / 3600)); unit=hour
-  else n=$((secs / 86400)); unit=day
-  fi
-  [ "$n" -eq 1 ] || unit="${unit}s"
-  echo "$n $unit ago"
-}
-
-# status_compact_repo REPO: at most two lines — "<result> <time ago> <path>" in
-# aligned columns, then blocker keys if any, else notes if any.
-status_compact_repo() {
-  local repo=$1 shown=$1 result keys notes sf
-  local indent='                        '
-  case "$repo" in "$HOME"/*) shown="~${repo#"$HOME"}" ;; esac
-  result=$(status_field "$repo" result)
-  if [ ! -d "$repo" ]; then result=missing
-  elif [ -z "$result" ]; then result=pending
-  fi
-  printf '%-8s %-14s %s\n' "$result" "$(time_ago "$(status_field "$repo" lastRun)")" "$shown"
-  [ -d "$repo" ] || return 0
-  sf=$(status_file "$repo")
-  keys=$(git config -f "$sf" --get-all status.blocker 2>/dev/null | cut -d' ' -f1 |
-    paste -sd, - | sed 's/,/, /g')
-  if [ -n "$keys" ]; then
-    echo "${indent}blocked by: $keys"
-    return 0
-  fi
-  notes=$(git config -f "$sf" --get-all status.note 2>/dev/null | paste -sd';' - | sed 's/;/; /g')
-  [ -z "$notes" ] || echo "${indent}note: $notes"
-}
-
-# status_repos LIST_ORDER: listed repos, one per line. By default repos needing
-# attention come first (blocked, then error, then missing), list order kept
-# within each group. With 1, plain list order.
-status_repos() {
-  local repo rank i=0
-  if [ "$1" -eq 1 ]; then
-    list_repos
-    return 0
-  fi
+# status_render VERBOSE LIST_ORDER: the per-repo part of `status`. One awk pass
+# reads the repo list and every status file (matched by status.path), so the
+# cost does not grow by a process per repo.
+#
+# Compact: at most two lines per repo — "<result> <time ago> <path>" in aligned
+# columns, then blocker keys if any, else notes if any. Verbose: every field.
+# Order: blocked, error, missing, then the rest (list order within a group);
+# LIST_ORDER=1 keeps plain list order.
+status_render() {
+  local verbose=$1 list_order=$2 repo i=0 exists mode gmode
+  gmode=$(cfg_get sync.mode)
+  set --
+  for f in "$GS_STATUS_DIR"/*; do [ -f "$f" ] && set -- "$@" "$f"; done
   list_repos | while IFS= read -r repo; do
     i=$((i + 1))
-    if [ ! -d "$repo" ]; then rank=2
-    else
-      case "$(status_field "$repo" result)" in
-        blocked) rank=0 ;;
-        error) rank=1 ;;
-        *) rank=3 ;;
-      esac
+    if [ -d "$repo" ]; then exists=1; else exists=0; fi
+    mode=
+    # Mode for repos without a status file (verbose only).
+    if [ "$verbose" = 1 ] && [ "$exists" = 1 ]; then
+      mode=$(git -C "$repo" config --get git-sync.mode 2>/dev/null) || mode=$gmode
     fi
-    printf '%s\t%s\t%s\n' "$rank" "$i" "$repo"
-  done | sort -t "$(printf '\t')" -k1,1n -k2,2n | cut -f3-
+    printf '%s\t%s\t%s\t%s\n' "$i" "$exists" "${mode:-$gmode}" "$repo"
+  done | awk -v verbose="$verbose" -v list_order="$list_order" -v now="$(date +%s)" \
+             -v home="$HOME" -f /dev/fd/3 - "$@" 3<<'AWK'
+# git-config value: drop unescaped quotes, unescape \" \\ \n \t.
+function unq(v,   out, i, c) {
+  out = ""
+  for (i = 1; i <= length(v); i++) {
+    c = substr(v, i, 1)
+    if (c == "\\" && i < length(v)) {
+      i++; c = substr(v, i, 1)
+      if (c == "n") c = "\n"; else if (c == "t") c = "\t"
+      out = out c; continue
+    }
+    if (c == "\"") continue
+    out = out c
+  }
+  return out
+}
+# "2026-10-01T15:33:46+0200" -> epoch seconds, or -1.
+function iso2epoch(s,   y, m, d, era, yoe, mp, doy, doe, e, off) {
+  if (s !~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9][+-][0-9][0-9][0-9][0-9]$/) return -1
+  y = substr(s, 1, 4) + 0; m = substr(s, 6, 2) + 0; d = substr(s, 9, 2) + 0
+  if (m <= 2) y--
+  era = int(y / 400); yoe = y - era * 400
+  mp = (m + 9) % 12
+  doy = int((153 * mp + 2) / 5) + d - 1
+  doe = yoe * 365 + int(yoe / 4) - int(yoe / 100) + doy
+  e = (era * 146097 + doe - 719468) * 86400 \
+      + substr(s, 12, 2) * 3600 + substr(s, 15, 2) * 60 + substr(s, 18, 2)
+  off = substr(s, 21, 2) * 3600 + substr(s, 23, 2) * 60
+  return substr(s, 20, 1) == "+" ? e - off : e + off
+}
+function ago(s,   e, secs, n, unit) {
+  if (s == "") return "never"
+  e = iso2epoch(s)
+  if (e < 0) return "unknown"
+  secs = now - e
+  if (secs < 60) return "< 1m ago"
+  if (secs < 3600) { n = int(secs / 60); unit = "minute" }
+  else if (secs < 86400) { n = int(secs / 3600); unit = "hour" }
+  else { n = int(secs / 86400); unit = "day" }
+  return n " " unit (n == 1 ? "" : "s") " ago"
+}
+FILENAME == "-" {
+  split($0, a, "\t")
+  n++; idx[n] = a[1]; ex[n] = a[2]; cmode[n] = a[3]
+  rp[n] = substr($0, length(a[1]) + length(a[2]) + length(a[3]) + 4)
+  next
+}
+FNR == 1 { p = "" ; delete f }
+/^[ \t]*[A-Za-z]+[ \t]*=/ {
+  k = $0; sub(/^[ \t]*/, "", k); sub(/[ \t]*=.*/, "", k); k = tolower(k)
+  v = $0; sub(/^[^=]*=[ \t]?/, "", v); v = unq(v)
+  if (k == "path") p = v
+  else f[k] = (k == "blocker" || k == "note") && (k in f) ? f[k] "\001" v : v
+}
+# Each file ends with its fields collected; store them under its path.
+{ if (p != "") { for (k in f) S[p, k] = f[k]; has[p] = 1 } }
+END {
+  ind = "                        "
+  for (r = 0; r <= 3; r++) {
+    for (j = 1; j <= n; j++) {
+      repo = rp[j]
+      res = !ex[j] ? "missing" : (repo in has ? S[repo, "result"] : "pending")
+      rank = list_order ? 0 : (res == "blocked" ? 0 : res == "error" ? 1 : res == "missing" ? 2 : 3)
+      if (rank != r) continue
+      shown = repo
+      if (index(repo, home "/") == 1) shown = "~" substr(repo, length(home) + 1)
+      blk = (repo, "blocker") in S ? S[repo, "blocker"] : ""
+      nts = (repo, "note") in S ? S[repo, "note"] : ""
+      if (!verbose) {
+        printf "%-8s %-14s %s\n", res, ago((repo, "lastrun") in S ? S[repo, "lastrun"] : ""), shown
+        if (!ex[j]) continue
+        if (blk != "") {
+          cnt = split(blk, b, "\001"); line = ""
+          for (q = 1; q <= cnt; q++) { sub(/ .*/, "", b[q]); line = line (q > 1 ? ", " : "") b[q] }
+          print ind "blocked by: " line
+        } else if (nts != "") {
+          gsub("\001", "; ", nts); print ind "note: " nts
+        }
+        continue
+      }
+      if (printed++) print ""
+      print repo
+      if (!ex[j]) { print "  result:        missing"; continue }
+      print "  mode:          " ((repo, "mode") in S ? S[repo, "mode"] : cmode[j])
+      if (!(repo in has)) {
+        print "  result:        never"; print "  last run:      never"; print "  last success:  never"
+        continue
+      }
+      print "  result:        " S[repo, "result"]
+      print "  last run:      " ((repo, "lastrun") in S ? S[repo, "lastrun"] : "never")
+      print "  last success:  " ((repo, "lastsuccess") in S ? S[repo, "lastsuccess"] : "never")
+      if (blk != "") { cnt = split(blk, b, "\001"); for (q = 1; q <= cnt; q++) print "  blocker:       " b[q] }
+      if (nts != "") { cnt = split(nts, b, "\001"); for (q = 1; q <= cnt; q++) print "  note:          " b[q] }
+    }
+  }
+}
+AWK
 }
 
 cmd_status() {
-  local repo first=1 v verbose=0 list_order=0
+  local verbose=0 list_order=0
   while [ $# -gt 0 ]; do
     case "$1" in
       -v|--verbose) verbose=1 ;;
@@ -1138,38 +1197,7 @@ cmd_status() {
     echo "No repos."
     return 0
   fi
-  if [ "$verbose" -eq 0 ]; then
-    status_repos "$list_order" | while IFS= read -r repo; do status_compact_repo "$repo"; done
-    return 0
-  fi
-  status_repos "$list_order" | while IFS= read -r repo; do
-    [ "$first" -eq 1 ] || echo
-    first=0
-    echo "$repo"
-    if [ ! -d "$repo" ]; then
-      echo "  result:        missing"
-      continue
-    fi
-    v=$(status_field "$repo" mode)
-    [ -n "$v" ] || v=$(cfg_get sync.mode "$repo")
-    echo "  mode:          $v"
-    v=$(status_field "$repo" result)
-    if [ -z "$v" ]; then
-      echo "  result:        never"
-      echo "  last run:      never"
-      echo "  last success:  never"
-      continue
-    fi
-    echo "  result:        $v"
-    v=$(status_field "$repo" lastRun)
-    echo "  last run:      ${v:-never}"
-    v=$(status_field "$repo" lastSuccess)
-    echo "  last success:  ${v:-never}"
-    git config -f "$(status_file "$repo")" --get-all status.blocker 2>/dev/null |
-      while IFS= read -r v; do echo "  blocker:       $v"; done
-    git config -f "$(status_file "$repo")" --get-all status.note 2>/dev/null |
-      while IFS= read -r v; do echo "  note:          $v"; done
-  done
+  status_render "$verbose" "$list_order"
 }
 
 # ---- dispatch ----

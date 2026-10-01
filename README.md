@@ -59,6 +59,8 @@ Resolution order: per-repo value, then global value, then default. Inspect with
 | `sync.mode` | yes | `fast-forward` | `maintain-only`, `maintain-and-fetch`, `fast-forward` |
 | `sync.branches` | yes | unset | space-separated branch names |
 | `sync.ffCheckedOut` | yes | `false` | `true`, `false` |
+| `sync.jobs` | no | `8` | repos synced in parallel by `sync --all`, 1–64 |
+| `sync.jitter` | no | `5s` | random 0–N s delay before each repo in `sync --all`, 0–60 |
 | `log.maxSize` | no | `3M` | number with optional `K`/`M`/`G`, bytes if no unit |
 | `notify.enabled` | no | `false` | `true`, `false` |
 | `notify.events` | no | `blocked` | non-empty subset of `finished blocked` |
@@ -92,6 +94,9 @@ git-sync help
   `<path>`, `sync --all` every registered repo.
   It prints one line per repo and exits 1 if any repo is not `ok`. Manual runs
   never send notifications.
+- `sync --all` (and the scheduled job) syncs up to `sync.jobs` repos at once;
+  each waits a random 0–`sync.jitter` seconds first to spread network load.
+  Lines are printed in finishing order. Syncing a single repo never waits.
 - A linked worktree is registered as its main worktree (with a warning).
 - Only one sync runs at a time (lock in `~/.git-sync/lock`); a concurrent run
   logs that and exits 0.
