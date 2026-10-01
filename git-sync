@@ -1,0 +1,92 @@
+#!/bin/sh
+# git-sync: keep git repos fresh on macOS via launchd.
+set -u
+
+# ---- constants ----
+GS_HOME=${GIT_SYNC_HOME:-$HOME/.git-sync}
+GS_CONFIG="$GS_HOME/config"
+GS_STATUS_DIR="$GS_HOME/status"
+GS_LOG="$GS_HOME/git-sync.log"
+GS_LAUNCHD_LOG="$GS_HOME/launchd.log"
+GS_LOCK="$GS_HOME/lock"
+GS_AGENTS_DIR=${GIT_SYNC_AGENTS_DIR:-$HOME/Library/LaunchAgents}
+GS_LABEL=com.git-sync.agent
+GS_PLIST="$GS_AGENTS_DIR/$GS_LABEL.plist"
+GS_LAUNCHCTL=${GIT_SYNC_LAUNCHCTL:-launchctl}
+
+# ---- util ----
+die() { echo "git-sync: $*" >&2; exit 1; }
+usage_die() {
+  echo "git-sync: $*" >&2
+  echo "Run 'git-sync help' for usage." >&2
+  exit 2
+}
+warn() { echo "git-sync: warning: $*" >&2; }
+now() { date +%Y-%m-%dT%H:%M:%S%z; }
+require_init() {
+  [ -f "$GS_CONFIG" ] || die "not initialized; run 'git-sync init'"
+}
+
+# ---- config ----
+
+# ---- repos ----
+
+# ---- log/lock/status ----
+
+# ---- sync engine ----
+
+# ---- agent ----
+
+# ---- notifications ----
+
+# ---- commands ----
+cmd_help() {
+  cat <<'EOF'
+Usage: git-sync <command> [args]
+
+Commands:
+  init                         Create ~/.git-sync with default config
+  install [<path>]             Add a repo (default: current) to the sync list
+  uninstall [<path>]           Remove a repo from the sync list
+  list                         List synced repos
+  status                       Show agent state and per-repo sync status
+  start                        Install and load the launchd agent
+  stop                         Unload and remove the launchd agent
+  config [--global] [--force] [--unset] [<key> [<value>]]
+                               Show or change configuration
+  sync [--all]                 Sync the current repo, or all listed repos
+  notifications [enable|disable]
+                               Show or toggle notifications
+  help                         Show this help
+EOF
+}
+
+cmd_init() {
+  if [ -f "$GS_CONFIG" ]; then
+    mkdir -p "$GS_STATUS_DIR" || die "cannot create $GS_STATUS_DIR"
+    echo "git-sync: already initialized ($GS_HOME)"
+    return 0
+  fi
+  mkdir -p "$GS_STATUS_DIR" || die "cannot create $GS_STATUS_DIR"
+  git config -f "$GS_CONFIG" sync.period 20m &&
+  git config -f "$GS_CONFIG" sync.mode fast-forward &&
+  git config -f "$GS_CONFIG" sync.ffCheckedOut false &&
+  git config -f "$GS_CONFIG" log.maxSize 3M &&
+  git config -f "$GS_CONFIG" notify.enabled false &&
+  git config -f "$GS_CONFIG" notify.events blocked ||
+    die "cannot write $GS_CONFIG"
+  echo "Initialized git-sync in $GS_HOME"
+  echo "Next: run 'git-sync install' inside a repo, then 'git-sync start'."
+}
+
+# ---- dispatch ----
+cmd=${1:-help}
+case "$cmd" in
+  help|-h|--help|init) ;;
+  install|uninstall|list|status|start|stop|config|sync|notifications) require_init ;;
+esac
+case "$cmd" in
+  help|-h|--help) cmd_help ;;
+  init) cmd_init ;;
+  *) usage_die "unknown command: $cmd" ;;
+esac
