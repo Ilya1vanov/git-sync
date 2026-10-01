@@ -123,6 +123,7 @@ test_config_set_global_and_validate() {
   { gs config --global notify.events "blocked nope" 2>/dev/null; [ $? -ne 0 ]; } &&
   { gs config --global sync.branches "bad..name" 2>/dev/null; [ $? -ne 0 ]; } &&
   { gs config --global sync.ffCheckedOut yes 2>/dev/null; [ $? -ne 0 ]; } &&
+  { gs config --global sync.period "$(printf '20m\nx')" 2>/dev/null; [ $? -ne 0 ]; } &&
   gs config --global notify.events "start finished blocked" &&
   gs config --global log.maxSize 512K && gs config --global sync.period 90 &&
   assert_eq "$(gs config sync.period)" 90
@@ -298,9 +299,16 @@ test_last_success_carried_over() {
 }
 test_lock_held_skips() {
   gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null || return 1
-  sleep 30 & pid=$! ; mkdir "$GIT_SYNC_HOME/lock" && echo $pid > "$GIT_SYNC_HOME/lock/pid" &&
+  printf '#!/bin/sh\nsleep 30\n' > "$T/bin/git-sync-holder" && chmod +x "$T/bin/git-sync-holder" || return 1
+  "$T/bin/git-sync-holder" & pid=$! ; mkdir "$GIT_SYNC_HOME/lock" && echo $pid > "$GIT_SYNC_HOME/lock/pid" &&
   out=$(gs sync --all) ; rc=$? ; kill $pid ;
   assert_eq $rc 0 && assert_contains "$out" "another run in progress" && assert_no_file "$(sf_of "$WORK")"
+}
+test_lock_reused_pid_reclaimed() {
+  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null || return 1
+  sleep 30 & pid=$! ; mkdir "$GIT_SYNC_HOME/lock" && echo $pid > "$GIT_SYNC_HOME/lock/pid" &&
+  gs sync --all >/dev/null ; rc=$? ; kill $pid ;
+  assert_eq $rc 0 && assert_file "$(sf_of "$WORK")" && [ ! -d "$GIT_SYNC_HOME/lock" ]
 }
 test_lock_stale_reclaimed() {
   gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null &&
@@ -314,17 +322,30 @@ test_log_rotation() {
   [ "$(wc -c < "$GIT_SYNC_HOME/git-sync.log")" -lt 1024 ] &&
   assert_contains "$(cat "$GIT_SYNC_HOME/git-sync.log")" "run start"
 }
-test_ssh_batchmode_env() {
-  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null &&
-  cat > "$T/bin/fakessh" <<'EOF'
+# ssh stub: records its args and GIT_OPTIONAL_LOCKS, then fails.
+ssh_stub() {
+  cat > "$T/bin/ssh" <<'EOF'
 #!/bin/sh
-echo "GIT_SSH_COMMAND=${GIT_SSH_COMMAND:-}" >> "$STUB_DIR/ssh.env"; exit 1
+echo "$* GIT_OPTIONAL_LOCKS=${GIT_OPTIONAL_LOCKS:-}" >> "$STUB_DIR/ssh.args"; exit 1
 EOF
-  chmod +x "$T/bin/fakessh" &&
+  chmod +x "$T/bin/ssh"
+}
+test_sync_env_injected() {
+  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null && ssh_stub &&
   git -C "$WORK" remote add sshr "ssh://example.invalid/x.git" &&
-  ( PATH="$T/bin:$PATH" GIT_SSH="$T/bin/fakessh"; export GIT_SSH; cd "$WORK" && gs sync >/dev/null 2>&1 );
-  assert_eq "$(sget "$WORK" result)" blocked &&
-  assert_contains "$(git config -f "$(sf_of "$WORK")" --get-all status.blocker)" "fetch-failed:sshr"
+  ( unset GIT_SSH_COMMAND GIT_SSH GIT_OPTIONAL_LOCKS; PATH="$T/bin:$PATH"; cd "$WORK" && gs sync >/dev/null 2>&1 );
+  a=$(cat "$T/ssh.args" 2>/dev/null) &&
+  assert_contains "$a" "BatchMode=yes" && assert_contains "$a" "ConnectTimeout=30" &&
+  assert_contains "$a" "ServerAliveInterval=15" && assert_contains "$a" "GIT_OPTIONAL_LOCKS=0" &&
+  assert_contains "$(blockers)" "fetch-failed:sshr"
+}
+test_sync_env_respects_core_sshcommand() {
+  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null && ssh_stub &&
+  git -C "$WORK" remote add sshr "ssh://example.invalid/x.git" &&
+  git -C "$WORK" config core.sshCommand "\"$T/bin/ssh\" --marker" &&
+  ( unset GIT_SSH_COMMAND GIT_SSH; cd "$WORK" && gs sync >/dev/null 2>&1 );
+  a=$(cat "$T/ssh.args" 2>/dev/null) &&
+  assert_contains "$a" "--marker" && assert_not_contains "$a" "BatchMode=yes"
 }
 
 ffsetup() { gs init >/dev/null && make_repos "$@" && gs install "$WORK" >/dev/null; }
@@ -362,6 +383,12 @@ test_ff_diverged_blocked() {
   git -C "$WORK" checkout -q develop && push_commit main m2 &&
   { (cd "$WORK" && gs sync >/dev/null); assert_eq $? 1; } &&
   assert_contains "$(blockers)" "main:diverged ahead 1, behind 1"
+}
+test_ff_ahead_only_is_note() {
+  ffsetup && git -C "$WORK" checkout -q develop && git -C "$WORK" commit -q --allow-empty -m local &&
+  git -C "$WORK" checkout -q main && (cd "$WORK" && gs config sync.branches develop) &&
+  (cd "$WORK" && gs sync >/dev/null) && assert_eq "$(sget "$WORK" result)" ok &&
+  assert_eq "$(notes)" "develop: ahead 1 (not pushed)" && assert_eq "$(blockers)" ""
 }
 test_ff_checked_out_skipped_by_default() {
   ffsetup && push_commit main m2 && before=$(git -C "$WORK" rev-parse main) &&
@@ -526,6 +553,10 @@ test_notify_start_finished() {
   make_repos && gs install "$WORK" >/dev/null && gs sync --all --job >/dev/null 2>&1 &&
   assert_eq "$(ncalls)" "git-sync|Sync started (1 repos)
 git-sync|1 repos: 1 ok, 0 blocked, 0 failed"
+}
+test_job_mode_quiet_stdout() {
+  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null &&
+  out=$(gs sync --all --job 2>/dev/null) && assert_eq "$out" ""
 }
 
 # --- runner ---

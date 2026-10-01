@@ -114,6 +114,10 @@ parse_size() {
 
 validate_value() {
   local key=$1 v=$2 w
+  case "$v" in
+    *"
+"*) echo "git-sync: value must be a single line" >&2; return 1 ;;
+  esac
   case "$key" in
     sync.period)
       if ! printf '%s' "$v" | grep -Eq '^[1-9][0-9]*[smh]?$'; then
@@ -131,11 +135,13 @@ validate_value() {
       if [ -z "$v" ]; then
         echo "git-sync: sync.branches must not be empty (unset it instead)" >&2; return 1
       fi
+      set -f
       for w in $v; do
         if ! git check-ref-format --branch "$w" >/dev/null 2>&1; then
-          echo "git-sync: invalid branch name: $w" >&2; return 1
+          echo "git-sync: invalid branch name: $w" >&2; set +f; return 1
         fi
-      done ;;
+      done
+      set +f ;;
     sync.ffCheckedOut|notify.enabled)
       case "$v" in
         true|false) ;;
@@ -149,12 +155,14 @@ validate_value() {
       if [ -z "$v" ]; then
         echo "git-sync: notify.events must not be empty" >&2; return 1
       fi
+      set -f
       for w in $v; do
         case "$w" in
           start|finished|blocked) ;;
-          *) echo "git-sync: invalid notify event: $w (allowed: start finished blocked)" >&2; return 1 ;;
+          *) echo "git-sync: invalid notify event: $w (allowed: start finished blocked)" >&2; set +f; return 1 ;;
         esac
-      done ;;
+      done
+      set +f ;;
   esac
   return 0
 }
@@ -233,7 +241,9 @@ lock_acquire() {
   if ! mkdir "$GS_LOCK" 2>/dev/null; then
     pid=$(cat "$GS_LOCK/pid" 2>/dev/null)
     if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
-      return 1
+      case "$(ps -p "$pid" -o command= 2>/dev/null)" in
+        *git-sync*) return 1 ;;
+      esac
     fi
     rm -rf "$GS_LOCK"
     mkdir "$GS_LOCK" 2>/dev/null || return 1
@@ -292,14 +302,15 @@ first_line() {
 
 git_env_for() {
   GIT_TERMINAL_PROMPT=0
-  export GIT_TERMINAL_PROMPT
+  GIT_OPTIONAL_LOCKS=0
+  export GIT_TERMINAL_PROMPT GIT_OPTIONAL_LOCKS
   if [ -n "$GS_ORIG_SSH_SET" ]; then
     GIT_SSH_COMMAND=$GS_ORIG_SSH_CMD
     export GIT_SSH_COMMAND
   elif git -C "$1" config --get core.sshCommand >/dev/null 2>&1; then
     unset GIT_SSH_COMMAND
   else
-    GIT_SSH_COMMAND="ssh -o BatchMode=yes"
+    GIT_SSH_COMMAND="ssh -o BatchMode=yes -o ConnectTimeout=30 -o ServerAliveInterval=15 -o ServerAliveCountMax=3"
     export GIT_SSH_COMMAND
   fi
 }
@@ -310,7 +321,7 @@ sync_fetch() {
   [ -n "$remotes" ] || return 0
   while IFS= read -r r; do
     [ -n "$r" ] || continue
-    if ! err=$(git -C "$repo" fetch --prune --quiet "$r" 2>&1 >/dev/null); then
+    if ! err=$(git -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=60 -C "$repo" fetch --prune --quiet "$r" 2>&1 >/dev/null); then
       add_blocker "fetch-failed:$r" "$(first_line "$err")"
       SYNC_FAILED_REMOTES="${SYNC_FAILED_REMOTES:+$SYNC_FAILED_REMOTES }$r"
     fi
@@ -400,7 +411,7 @@ EOF
 
 # sync_ff REPO: fast-forward configured/default branches (spec "Sync algorithm" step 2).
 sync_ff() {
-  local repo=$1 b u remote old new w err name n ffco branches
+  local repo=$1 b u remote old new w err name n ffco branches ahead behind
   ffco=$(cfg_get sync.ffCheckedOut "$repo")
   branches=$(ff_branch_list "$repo")
   while IFS= read -r b; do
@@ -413,8 +424,14 @@ sync_ff() {
     old=$(git -C "$repo" rev-parse "refs/heads/$b" 2>/dev/null) || continue
     new=$(git -C "$repo" rev-parse "$u" 2>/dev/null) || continue
     [ "$old" != "$new" ] || continue
-    if ! git -C "$repo" merge-base --is-ancestor "$old" "$new"; then
-      add_blocker "$b:diverged" "ahead $(git -C "$repo" rev-list --count "$new..$old"), behind $(git -C "$repo" rev-list --count "$old..$new")"
+    ahead=$(git -C "$repo" rev-list --count "$new..$old" 2>/dev/null) || continue
+    behind=$(git -C "$repo" rev-list --count "$old..$new" 2>/dev/null) || continue
+    if [ "$behind" = 0 ]; then
+      [ "$ahead" = 0 ] || add_note "$b: ahead $ahead (not pushed)"
+      continue
+    fi
+    if [ "$ahead" != 0 ]; then
+      add_blocker "$b:diverged" "ahead $ahead, behind $behind"
       continue
     fi
     if w=$(worktree_of "$repo" "$b"); then
@@ -429,6 +446,10 @@ sync_ff() {
       n=$(git -C "$w" status --porcelain --untracked-files=no | wc -l | tr -d ' ')
       if [ "$n" != 0 ]; then
         add_blocker "$b:dirty" "$n tracked files changed in $w"
+        continue
+      fi
+      if [ "$(git -C "$w" symbolic-ref -q HEAD 2>/dev/null)" != "refs/heads/$b" ]; then
+        add_blocker "$b:ff-failed" "worktree $w switched branch"
         continue
       fi
       if ! err=$(git -C "$w" merge --ff-only --no-autostash --quiet "$new" 2>&1); then
@@ -763,11 +784,13 @@ cmd_sync() {
   while IFS= read -r line; do
     [ -n "$line" ] || continue
     sync_repo "$line" "$listed" </dev/null
-    keys=$(blocker_keys | paste -sd, -)
-    if [ -n "$keys" ]; then
-      printf '%s: %s (%s)\n' "$line" "$SYNC_RESULT" "$keys"
-    else
-      printf '%s: %s\n' "$line" "$SYNC_RESULT"
+    if [ "$GS_JOB" = 0 ]; then
+      keys=$(blocker_keys | paste -sd, -)
+      if [ -n "$keys" ]; then
+        printf '%s: %s (%s)\n' "$line" "$SYNC_RESULT" "$keys"
+      else
+        printf '%s: %s\n' "$line" "$SYNC_RESULT"
+      fi
     fi
     case "$SYNC_RESULT" in
       ok) ok=$((ok + 1)) ;;
