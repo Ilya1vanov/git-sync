@@ -107,6 +107,62 @@ test_install_sh_copies() {
   PREFIX="$T/bin2" sh "$ROOT/install.sh" >/dev/null
 }
 
+test_config_get_defaults() {
+  gs init >/dev/null &&
+  assert_eq "$(gs config sync.period)" 20m &&
+  assert_eq "$(gs config sync.mode)" fast-forward &&
+  assert_eq "$(gs config sync.branches)" ""
+}
+test_config_set_global_and_validate() {
+  gs init >/dev/null &&
+  gs config --global sync.period 30m && assert_eq "$(gs config sync.period)" 30m &&
+  { gs config --global sync.period abc 2>"$T/err"; [ $? -ne 0 ]; } &&
+  { gs config --global sync.period 30s 2>/dev/null; [ $? -ne 0 ]; } &&
+  { gs config --global sync.mode foo 2>/dev/null; [ $? -ne 0 ]; } &&
+  { gs config --global log.maxSize 3X 2>/dev/null; [ $? -ne 0 ]; } &&
+  { gs config --global notify.events "blocked nope" 2>/dev/null; [ $? -ne 0 ]; } &&
+  { gs config --global sync.branches "bad..name" 2>/dev/null; [ $? -ne 0 ]; } &&
+  { gs config --global sync.ffCheckedOut yes 2>/dev/null; [ $? -ne 0 ]; } &&
+  gs config --global notify.events "start finished blocked" &&
+  gs config --global log.maxSize 512K && gs config --global sync.period 90 &&
+  assert_eq "$(gs config sync.period)" 90
+}
+test_config_repo_override_and_unset() {
+  gs init >/dev/null && make_repos && cd "$WORK" &&
+  gs config sync.mode maintain-only &&
+  assert_eq "$(git config git-sync.mode)" maintain-only &&
+  assert_eq "$(gs config sync.mode)" maintain-only &&
+  out=$(gs config) && assert_contains "$out" "sync.mode = maintain-only (repo)" &&
+  gs config --unset sync.mode && assert_eq "$(gs config sync.mode)" fast-forward &&
+  gs config --unset sync.mode
+}
+test_config_global_only_key_in_repo_is_usage_error() {
+  gs init >/dev/null && make_repos && cd "$WORK" &&
+  { gs config sync.period 30m 2>"$T/err"; assert_eq $? 2; } &&
+  assert_contains "$(cat "$T/err")" "global-only"
+}
+test_config_outside_repo_without_global() {
+  gs init >/dev/null && mkdir "$T/plain" && cd "$T/plain" &&
+  { gs config sync.mode maintain-only 2>/dev/null; assert_eq $? 2; }
+}
+test_config_unknown_key() {
+  gs init >/dev/null &&
+  { gs config --global foo.bar 1 2>/dev/null; assert_eq $? 2; } &&
+  gs config --global --force foo.bar 1 &&
+  assert_eq "$(git config -f "$GIT_SYNC_HOME/config" foo.bar)" 1
+}
+test_config_sync_repo_forbidden() {
+  gs init >/dev/null &&
+  { gs config --global sync.repo /x 2>"$T/err"; assert_eq $? 2; } &&
+  assert_contains "$(cat "$T/err")" "install/uninstall"
+}
+test_config_list_shows_sources() {
+  gs init >/dev/null && gs config --global sync.period 45m &&
+  out=$(gs config) && assert_contains "$out" "sync.period = 45m (global)" &&
+  assert_contains "$out" "sync.mode = fast-forward (global)" &&
+  assert_not_contains "$out" "sync.repo"
+}
+
 # --- runner ---
 if [ $# -gt 0 ]; then TESTS="$*"; else
   TESTS=$(grep -E '^test_[a-z0-9_]+\(\)' "$0" | sed 's/().*//')

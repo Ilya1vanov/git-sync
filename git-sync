@@ -28,6 +28,137 @@ require_init() {
 }
 
 # ---- config ----
+cfg_known() {
+  case "$1" in
+    sync.period|sync.repo|sync.mode|sync.branches|sync.ffCheckedOut|log.maxSize|notify.enabled|notify.events) return 0 ;;
+  esac
+  return 1
+}
+
+cfg_default() {
+  case "$1" in
+    sync.period) echo 20m ;;
+    sync.mode) echo fast-forward ;;
+    sync.branches) echo "" ;;
+    sync.ffCheckedOut) echo false ;;
+    log.maxSize) echo 3M ;;
+    notify.enabled) echo false ;;
+    notify.events) echo blocked ;;
+    *) return 1 ;;
+  esac
+}
+
+cfg_repo_name() {
+  case "$1" in
+    sync.mode) echo git-sync.mode ;;
+    sync.branches) echo git-sync.branches ;;
+    sync.ffCheckedOut) echo git-sync.ffCheckedOut ;;
+    *) return 1 ;;
+  esac
+}
+
+cfg_global_get() {
+  git config -f "$GS_CONFIG" --get "$1" 2>/dev/null
+}
+
+cfg_get() {
+  local key=$1 repo=${2:-} name val
+  if [ -n "$repo" ] && name=$(cfg_repo_name "$key"); then
+    if val=$(git -C "$repo" config --get "$name" 2>/dev/null); then
+      printf '%s\n' "$val"
+      return 0
+    fi
+  fi
+  if val=$(cfg_global_get "$key"); then
+    printf '%s\n' "$val"
+    return 0
+  fi
+  cfg_default "$key"
+}
+
+cfg_source() {
+  local key=$1 repo=${2:-} name
+  if [ -n "$repo" ] && name=$(cfg_repo_name "$key") &&
+     git -C "$repo" config --get "$name" >/dev/null 2>&1; then
+    echo repo
+  elif cfg_global_get "$key" >/dev/null; then
+    echo global
+  else
+    echo default
+  fi
+}
+
+parse_period() {
+  local v=$1 n
+  case "$v" in
+    *s) echo "${v%s}" ;;
+    *m) n=${v%m}; echo $((n * 60)) ;;
+    *h) n=${v%h}; echo $((n * 3600)) ;;
+    *) echo "$v" ;;
+  esac
+}
+
+parse_size() {
+  local v=$1 n
+  case "$v" in
+    *K) n=${v%K}; echo $((n * 1024)) ;;
+    *M) n=${v%M}; echo $((n * 1048576)) ;;
+    *G) n=${v%G}; echo $((n * 1073741824)) ;;
+    *) echo "$v" ;;
+  esac
+}
+
+validate_value() {
+  local key=$1 v=$2 w
+  case "$key" in
+    sync.period)
+      if ! printf '%s' "$v" | grep -Eq '^[1-9][0-9]*[smh]?$'; then
+        echo "git-sync: sync.period must look like 20m, 90, 2h or 45s" >&2; return 1
+      fi
+      if [ "$(parse_period "$v")" -lt 60 ]; then
+        echo "git-sync: sync.period must be >= 60s" >&2; return 1
+      fi ;;
+    sync.mode)
+      case "$v" in
+        maintain-only|maintain-and-fetch|fast-forward) ;;
+        *) echo "git-sync: sync.mode must be one of: maintain-only, maintain-and-fetch, fast-forward" >&2; return 1 ;;
+      esac ;;
+    sync.branches)
+      if [ -z "$v" ]; then
+        echo "git-sync: sync.branches must not be empty (unset it instead)" >&2; return 1
+      fi
+      for w in $v; do
+        if ! git check-ref-format --branch "$w" >/dev/null 2>&1; then
+          echo "git-sync: invalid branch name: $w" >&2; return 1
+        fi
+      done ;;
+    sync.ffCheckedOut|notify.enabled)
+      case "$v" in
+        true|false) ;;
+        *) echo "git-sync: $key must be true or false" >&2; return 1 ;;
+      esac ;;
+    log.maxSize)
+      if ! printf '%s' "$v" | grep -Eq '^[1-9][0-9]*[KMG]?$'; then
+        echo "git-sync: log.maxSize must look like 3M, 512K, 1G or a byte count" >&2; return 1
+      fi ;;
+    notify.events)
+      if [ -z "$v" ]; then
+        echo "git-sync: notify.events must not be empty" >&2; return 1
+      fi
+      for w in $v; do
+        case "$w" in
+          start|finished|blocked) ;;
+          *) echo "git-sync: invalid notify event: $w (allowed: start finished blocked)" >&2; return 1 ;;
+        esac
+      done ;;
+  esac
+  return 0
+}
+
+# Temporary minimal version; Task 3 replaces the body with `resolve_repo .`.
+in_repo_root() {
+  git rev-parse --show-toplevel 2>/dev/null
+}
 
 # ---- repos ----
 
@@ -79,6 +210,103 @@ cmd_init() {
   echo "Next: run 'git-sync install' inside a repo, then 'git-sync start'."
 }
 
+cmd_config() {
+  local global=0 force=0 unset=0 key= val= nargs=0 repo= name target k v src
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --global) global=1 ;;
+      --force) force=1 ;;
+      --unset) unset=1 ;;
+      -*) usage_die "unknown option: $1" ;;
+      *)
+        nargs=$((nargs + 1))
+        case $nargs in
+          1) key=$1 ;;
+          2) val=$1 ;;
+          *) usage_die "too many arguments" ;;
+        esac ;;
+    esac
+    shift
+  done
+
+  if [ "$global" -eq 0 ]; then repo=$(in_repo_root) || repo=; fi
+
+  if [ "$nargs" -eq 0 ]; then
+    [ "$unset" -eq 0 ] || usage_die "--unset requires a key"
+    for k in sync.period sync.mode sync.branches sync.ffCheckedOut log.maxSize notify.enabled notify.events; do
+      v=$(cfg_get "$k" "$repo")
+      src=$(cfg_source "$k" "$repo")
+      if [ "$src" = default ] && [ "$k" = sync.branches ]; then
+        echo "$k = $v (default: repository default branch)"
+      else
+        echo "$k = $v ($src)"
+      fi
+    done
+    return 0
+  fi
+
+  if [ "$key" = sync.repo ]; then
+    if [ "$nargs" -ge 2 ] || [ "$unset" -eq 1 ]; then
+      usage_die "sync.repo is managed by 'git-sync install/uninstall'"
+    fi
+    git config -f "$GS_CONFIG" --get-all sync.repo
+    return 0
+  fi
+
+  if ! cfg_known "$key" && [ "$force" -eq 0 ]; then
+    usage_die "unknown key: $key"
+  fi
+
+  if [ "$nargs" -eq 1 ] && [ "$unset" -eq 0 ]; then
+    if cfg_known "$key"; then
+      cfg_get "$key" "$repo"
+    elif [ "$global" -eq 1 ]; then
+      git config -f "$GS_CONFIG" --get "$key"
+    else
+      [ -n "$repo" ] || usage_die "not in a git repository; use --global"
+      git -C "$repo" config --get "$key"
+    fi
+    return $?
+  fi
+
+  if [ "$unset" -eq 0 ] && cfg_known "$key"; then
+    validate_value "$key" "$val" || exit 2
+  fi
+
+  if [ "$global" -eq 1 ]; then
+    target=global
+    name=$key
+  else
+    [ -n "$repo" ] || usage_die "not in a git repository; use --global"
+    target=repo
+    if cfg_known "$key"; then
+      name=$(cfg_repo_name "$key") || usage_die "$key is global-only; use --global"
+    else
+      name=$key
+    fi
+  fi
+
+  if [ "$unset" -eq 1 ]; then
+    if [ "$target" = global ]; then
+      git config -f "$GS_CONFIG" --unset "$name"
+    else
+      git -C "$repo" config --unset "$name"
+    fi
+    case $? in 0|5) ;; *) die "cannot unset $key" ;; esac
+  else
+    if [ "$target" = global ]; then
+      git config -f "$GS_CONFIG" "$name" "$val" || die "cannot write $key"
+    else
+      git -C "$repo" config "$name" "$val" || die "cannot write $key"
+    fi
+  fi
+
+  if [ "$target" = global ] && [ "$key" = sync.period ]; then
+    if command -v agent_reload_if_installed >/dev/null 2>&1; then agent_reload_if_installed; fi
+  fi
+  return 0
+}
+
 # ---- dispatch ----
 cmd=${1:-help}
 case "$cmd" in
@@ -88,5 +316,6 @@ esac
 case "$cmd" in
   help|-h|--help) cmd_help ;;
   init) cmd_init ;;
+  config) shift; cmd_config "$@" ;;
   *) usage_die "unknown command: $cmd" ;;
 esac
