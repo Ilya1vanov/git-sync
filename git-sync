@@ -581,6 +581,50 @@ agent_reload_if_installed() {
 }
 
 # ---- notifications ----
+notify() {
+  if [ -n "${GIT_SYNC_NOTIFY_CMD:-}" ]; then
+    "$GIT_SYNC_NOTIFY_CMD" "$1" "$2" </dev/null >/dev/null 2>&1 ||
+      log_msg WARN "notification failed"
+  else
+    osascript -e 'on run argv' -e 'display notification (item 2 of argv) with title (item 1 of argv)' -e 'end run' "$1" "$2" </dev/null >/dev/null 2>&1 ||
+      log_msg WARN "notification failed"
+  fi
+  return 0
+}
+
+notify_wanted() {
+  local w found=1
+  [ "$GS_JOB" = 1 ] || return 1
+  [ "$(cfg_get notify.enabled)" = true ] || return 1
+  set -f
+  for w in $(cfg_get notify.events); do
+    if [ "$w" = "$1" ]; then found=0; fi
+  done
+  set +f
+  return "$found"
+}
+
+notify_run_start() {
+  if notify_wanted start; then notify "git-sync" "Sync started ($1 repos)"; fi
+  return 0
+}
+
+notify_repo() {
+  local k new=
+  notify_wanted blocked || return 0
+  for k in $(blocker_keys); do
+    if ! printf '%s\n' "$SYNC_PREV_KEYS" | grep -qxF -- "$k"; then
+      new=${new:+$new, }$k
+    fi
+  done
+  if [ -n "$new" ]; then notify "git-sync: $(basename "$1")" "$new"; fi
+  return 0
+}
+
+notify_run_end() {
+  if notify_wanted finished; then notify "git-sync" "$(( $1 + $2 + $3 )) repos: $1 ok, $2 blocked, $3 failed"; fi
+  return 0
+}
 
 # ---- commands ----
 cmd_help() {
@@ -853,6 +897,20 @@ cmd_stop() {
   echo "Stopped"
 }
 
+cmd_notifications() {
+  case "${1:-}" in
+    "") ;;
+    enable) git config -f "$GS_CONFIG" notify.enabled true ;;
+    disable) git config -f "$GS_CONFIG" notify.enabled false ;;
+    *) usage_die "usage: git-sync notifications [enable|disable]" ;;
+  esac
+  if [ "$(cfg_get notify.enabled)" = true ]; then
+    echo "enabled ($(cfg_get notify.events))"
+  else
+    echo disabled
+  fi
+}
+
 cmd_status() {
   local repo first=1 v
   if agent_loaded; then echo "Agent:         loaded"; else echo "Agent:         not loaded"; fi
@@ -913,5 +971,6 @@ case "$cmd" in
   stop) shift; cmd_stop "$@" ;;
   config) shift; cmd_config "$@" ;;
   sync) shift; cmd_sync "$@" ;;
+  notifications) shift; cmd_notifications "$@" ;;
   *) usage_die "unknown command: $cmd" ;;
 esac

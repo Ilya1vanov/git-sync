@@ -497,6 +497,37 @@ test_status_no_repos() {
   gs init >/dev/null && out=$(gs status) && assert_contains "$out" "No repos."
 }
 
+ncalls() { cat "$T/notify.calls" 2>/dev/null; }
+
+test_notifications_command() {
+  gs init >/dev/null && assert_eq "$(gs notifications)" disabled &&
+  gs notifications enable >/dev/null && assert_eq "$(gs notifications)" "enabled (blocked)" &&
+  gs config --global notify.events "start finished" && assert_eq "$(gs notifications)" "enabled (start finished)" &&
+  gs notifications disable >/dev/null && assert_eq "$(gs notifications)" disabled &&
+  { gs notifications maybe 2>/dev/null; assert_eq $? 2; }
+}
+test_notify_only_in_job_and_enabled() {
+  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null && git -C "$WORK" remote add dead "$T/nope.git" &&
+  quiet "$GS" sync --all --job && assert_eq "$(ncalls)" "" &&
+  gs notifications enable >/dev/null && quiet "$GS" sync --all && assert_eq "$(ncalls)" "" &&
+  git -C "$WORK" remote add dead2 "$T/nope2.git" &&
+  quiet "$GS" sync --all --job && assert_contains "$(ncalls)" "git-sync: work|fetch-failed:dead2"
+}
+test_notify_blocked_dedupe() {
+  gs init >/dev/null && gs notifications enable >/dev/null && make_repos && gs install "$WORK" >/dev/null &&
+  git -C "$WORK" remote add dead "$T/nope.git" &&
+  quiet "$GS" sync --all --job && quiet "$GS" sync --all --job &&
+  assert_eq "$(ncalls | wc -l | tr -d ' ')" 1 &&
+  git -C "$WORK" remote add dead2 "$T/nope2.git" && quiet "$GS" sync --all --job &&
+  assert_eq "$(ncalls | tail -1)" "git-sync: work|fetch-failed:dead2"
+}
+test_notify_start_finished() {
+  gs init >/dev/null && gs notifications enable >/dev/null && gs config --global notify.events "start finished" &&
+  make_repos && gs install "$WORK" >/dev/null && gs sync --all --job >/dev/null 2>&1 &&
+  assert_eq "$(ncalls)" "git-sync|Sync started (1 repos)
+git-sync|1 repos: 1 ok, 0 blocked, 0 failed"
+}
+
 # --- runner ---
 if [ $# -gt 0 ]; then TESTS="$*"; else
   TESTS=$(grep -E '^test_[a-z0-9_]+\(\)' "$0" | sed 's/().*//')
