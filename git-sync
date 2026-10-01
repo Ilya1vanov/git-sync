@@ -537,6 +537,48 @@ sync_repo() {
 }
 
 # ---- agent ----
+self_path() {
+  local d
+  d=$(cd -P "$(dirname "$0")" && pwd) || return 1
+  echo "$d/$(basename "$0")"
+}
+
+xml_escape() {
+  printf '%s' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' -e 's/"/\&quot;/g'
+}
+
+agent_write_plist() {
+  local self secs
+  self=$(self_path) || die "cannot resolve own path"
+  secs=$(parse_period "$(cfg_get sync.period)")
+  mkdir -p "$GS_AGENTS_DIR" || die "cannot create $GS_AGENTS_DIR"
+  {
+    printf '%s\n' '<?xml version="1.0" encoding="UTF-8"?>'
+    printf '%s\n' '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">'
+    printf '%s\n' '<plist version="1.0">' '<dict>'
+    printf '  <key>Label</key>\n  <string>%s</string>\n' "$(xml_escape "$GS_LABEL")"
+    printf '  <key>ProgramArguments</key>\n  <array>\n'
+    printf '    <string>%s</string>\n' "$(xml_escape "$self")" sync --all --job
+    printf '  </array>\n'
+    printf '  <key>StartInterval</key>\n  <integer>%s</integer>\n' "$secs"
+    printf '  <key>RunAtLoad</key>\n  <true/>\n'
+    printf '  <key>EnvironmentVariables</key>\n  <dict>\n'
+    printf '    <key>PATH</key>\n    <string>%s</string>\n' "$(xml_escape "${PATH-}")"
+    printf '    <key>GIT_SYNC_HOME</key>\n    <string>%s</string>\n' "$(xml_escape "$GS_HOME")"
+    printf '  </dict>\n'
+    printf '  <key>StandardOutPath</key>\n  <string>%s</string>\n' "$(xml_escape "$GS_LAUNCHD_LOG")"
+    printf '  <key>StandardErrorPath</key>\n  <string>%s</string>\n' "$(xml_escape "$GS_LAUNCHD_LOG")"
+    printf '%s\n' '</dict>' '</plist>'
+  } > "$GS_PLIST" || die "cannot write $GS_PLIST"
+}
+
+agent_loaded() {
+  $GS_LAUNCHCTL print "gui/$(id -u)/$GS_LABEL" >/dev/null 2>&1
+}
+
+agent_reload_if_installed() {
+  if [ -f "$GS_PLIST" ]; then cmd_start >/dev/null; fi
+}
 
 # ---- notifications ----
 
@@ -793,6 +835,67 @@ cmd_config() {
   return 0
 }
 
+cmd_start() {
+  local period
+  agent_write_plist
+  : > "$GS_LAUNCHD_LOG"
+  $GS_LAUNCHCTL bootout "gui/$(id -u)/$GS_LABEL" >/dev/null 2>&1
+  $GS_LAUNCHCTL bootstrap "gui/$(id -u)" "$GS_PLIST" || die "launchctl bootstrap failed"
+  period=$(cfg_get sync.period)
+  log_msg INFO "agent started (every $period)"
+  echo "Started (every $period)"
+}
+
+cmd_stop() {
+  $GS_LAUNCHCTL bootout "gui/$(id -u)/$GS_LABEL" >/dev/null 2>&1
+  rm -f "$GS_PLIST"
+  log_msg INFO "agent stopped"
+  echo "Stopped"
+}
+
+cmd_status() {
+  local repo first=1 v
+  if agent_loaded; then echo "Agent:         loaded"; else echo "Agent:         not loaded"; fi
+  echo "Period:        $(cfg_get sync.period)"
+  if [ "$(cfg_get notify.enabled)" = true ]; then
+    echo "Notifications: enabled ($(cfg_get notify.events))"
+  else
+    echo "Notifications: disabled"
+  fi
+  if [ -z "$(list_repos)" ]; then
+    echo "No repos."
+    return 0
+  fi
+  list_repos | while IFS= read -r repo; do
+    [ "$first" -eq 1 ] || echo
+    first=0
+    echo "$repo"
+    if [ ! -d "$repo" ]; then
+      echo "  result:        missing"
+      continue
+    fi
+    v=$(status_field "$repo" mode)
+    [ -n "$v" ] || v=$(cfg_get sync.mode "$repo")
+    echo "  mode:          $v"
+    v=$(status_field "$repo" result)
+    if [ -z "$v" ]; then
+      echo "  result:        never"
+      echo "  last run:      never"
+      echo "  last success:  never"
+      continue
+    fi
+    echo "  result:        $v"
+    v=$(status_field "$repo" lastRun)
+    echo "  last run:      ${v:-never}"
+    v=$(status_field "$repo" lastSuccess)
+    echo "  last success:  ${v:-never}"
+    git config -f "$(status_file "$repo")" --get-all status.blocker 2>/dev/null |
+      while IFS= read -r v; do echo "  blocker:       $v"; done
+    git config -f "$(status_file "$repo")" --get-all status.note 2>/dev/null |
+      while IFS= read -r v; do echo "  note:          $v"; done
+  done
+}
+
 # ---- dispatch ----
 cmd=${1:-help}
 case "$cmd" in
@@ -805,6 +908,9 @@ case "$cmd" in
   install) shift; cmd_install "$@" ;;
   uninstall) shift; cmd_uninstall "$@" ;;
   list) shift; cmd_list "$@" ;;
+  status) shift; cmd_status "$@" ;;
+  start) shift; cmd_start "$@" ;;
+  stop) shift; cmd_stop "$@" ;;
   config) shift; cmd_config "$@" ;;
   sync) shift; cmd_sync "$@" ;;
   *) usage_die "unknown command: $cmd" ;;

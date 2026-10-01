@@ -457,6 +457,46 @@ test_sync_all_stdin_not_consumed() {
   assert_file "$(sf_of "$WORK")" && assert_file "$(sf_of "$T/work2")"
 }
 
+test_start_writes_plist_and_bootstraps() {
+  gs init >/dev/null && out=$(gs start) && assert_contains "$out" "Started (every 20m)" &&
+  p="$GIT_SYNC_AGENTS_DIR/com.git-sync.agent.plist" && assert_file "$p" &&
+  plutil -lint "$p" >/dev/null &&
+  assert_eq "$(plutil -extract StartInterval raw "$p")" 1200 &&
+  assert_eq "$(plutil -extract RunAtLoad raw "$p")" true &&
+  assert_eq "$(plutil -extract ProgramArguments.0 raw "$p")" "$GS" &&
+  assert_eq "$(plutil -extract ProgramArguments.3 raw "$p")" "--job" &&
+  assert_eq "$(plutil -extract EnvironmentVariables.GIT_SYNC_HOME raw "$p")" "$GIT_SYNC_HOME" &&
+  assert_contains "$(cat "$T/launchctl.calls")" "bootstrap gui/$(id -u) $p"
+}
+test_start_idempotent_and_stop() {
+  gs init >/dev/null && gs start >/dev/null && gs start >/dev/null &&
+  assert_eq "$(grep -c '^bootstrap' "$T/launchctl.calls")" 2 &&
+  gs stop >/dev/null && assert_no_file "$GIT_SYNC_AGENTS_DIR/com.git-sync.agent.plist" &&
+  gs stop >/dev/null
+}
+test_period_change_reloads_agent() {
+  gs init >/dev/null && gs start >/dev/null && gs config --global sync.period 1h &&
+  assert_eq "$(plutil -extract StartInterval raw "$GIT_SYNC_AGENTS_DIR/com.git-sync.agent.plist")" 3600
+}
+test_period_change_without_agent_does_not_start() {
+  gs init >/dev/null && gs config --global sync.period 1h &&
+  assert_no_file "$GIT_SYNC_AGENTS_DIR/com.git-sync.agent.plist"
+}
+test_status_output() {
+  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null &&
+  out=$(gs status) && assert_contains "$out" "Agent:         not loaded" &&
+  assert_contains "$out" "Period:        20m" && assert_contains "$out" "Notifications: disabled" &&
+  assert_contains "$out" "  result:        never" &&
+  push_commit main && git -C "$WORK" remote add dead "$T/nope.git" && (cd "$WORK" && gs sync >/dev/null);
+  gs start >/dev/null && out=$(gs status) && assert_contains "$out" "Agent:         loaded" &&
+  assert_contains "$out" "$WORK" && assert_contains "$out" "  mode:          fast-forward" &&
+  assert_contains "$out" "  result:        blocked" && assert_contains "$out" "  blocker:       fetch-failed:dead" &&
+  assert_contains "$out" "  note:          main: skipped (checked out)" && assert_contains "$out" "  last run:"
+}
+test_status_no_repos() {
+  gs init >/dev/null && out=$(gs status) && assert_contains "$out" "No repos."
+}
+
 # --- runner ---
 if [ $# -gt 0 ]; then TESTS="$*"; else
   TESTS=$(grep -E '^test_[a-z0-9_]+\(\)' "$0" | sed 's/().*//')
