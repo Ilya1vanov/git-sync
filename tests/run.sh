@@ -226,6 +226,107 @@ test_list_formats() {
   rm -rf "$WORK" && assert_eq "$(gs list)" "$WORK  fast-forward  missing"
 }
 
+sf_of() { echo "$GIT_SYNC_HOME/status/$(printf %s "$1" | shasum -a 1 | cut -c1-16)"; }
+sget() { git config -f "$(sf_of "$1")" "status.$2"; }
+
+test_sync_outside_repo_usage() {
+  gs init >/dev/null && mkdir "$T/p" && cd "$T/p" &&
+  { gs sync 2>"$T/err"; assert_eq $? 2; } && assert_contains "$(cat "$T/err")" "--all"
+}
+test_sync_fetch_updates_remote_refs() {
+  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null &&
+  (cd "$WORK" && gs config sync.mode maintain-and-fetch) &&
+  push_commit main m2 && cd "$WORK" && out=$(gs sync) &&
+  assert_eq "$out" "$WORK: ok" &&
+  assert_eq "$(git rev-parse origin/main)" "$(git -C "$T/remote.git" rev-parse main)" &&
+  assert_eq "$(sget "$WORK" result)" ok && assert_eq "$(sget "$WORK" mode)" maintain-and-fetch &&
+  [ -n "$(sget "$WORK" lastRun)" ] && [ -n "$(sget "$WORK" lastSuccess)" ]
+}
+test_sync_prunes_deleted_remote_branch() {
+  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null &&
+  (cd "$T/pusher" && git push -q origin main:tmp) && (cd "$WORK" && gs sync >/dev/null) &&
+  git -C "$WORK" rev-parse -q --verify origin/tmp >/dev/null &&
+  (cd "$T/pusher" && git push -q origin :tmp) && (cd "$WORK" && gs sync >/dev/null) &&
+  ! git -C "$WORK" rev-parse -q --verify origin/tmp >/dev/null
+}
+test_sync_maintain_only_no_fetch() {
+  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null &&
+  (cd "$WORK" && gs config sync.mode maintain-only) && before=$(git -C "$WORK" rev-parse origin/main) &&
+  push_commit main m2 && (cd "$WORK" && gs sync >/dev/null) &&
+  assert_eq "$(git -C "$WORK" rev-parse origin/main)" "$before" && assert_eq "$(sget "$WORK" result)" ok
+}
+test_fetch_dead_remote_isolated() {
+  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null &&
+  (cd "$WORK" && gs config sync.mode maintain-and-fetch) &&
+  git -C "$WORK" remote add dead "$T/nope.git" && push_commit main m2 &&
+  { (cd "$WORK" && gs sync >"$T/out"); assert_eq $? 1; } &&
+  assert_eq "$(git -C "$WORK" rev-parse origin/main)" "$(git -C "$T/remote.git" rev-parse main)" &&
+  assert_eq "$(sget "$WORK" result)" blocked &&
+  assert_contains "$(git config -f "$(sf_of "$WORK")" --get-all status.blocker)" "fetch-failed:dead " &&
+  assert_contains "$(cat "$T/out")" "$WORK: blocked (fetch-failed:dead)"
+}
+test_sync_all_and_missing() {
+  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null &&
+  git clone -q "$T/remote.git" "$T/other" && gs install "$T/other" >/dev/null && rm -rf "$T/other" &&
+  { gs sync --all >"$T/out" 2>&1; assert_eq $? 1; } &&
+  assert_contains "$(cat "$T/out")" "$WORK: ok" && assert_contains "$(cat "$T/out")" "$T/other: missing" &&
+  assert_eq "$(sget "$T/other" result)" missing && assert_contains "$(cat "$GIT_SYNC_HOME/git-sync.log")" "WARN"
+}
+test_sync_invalid_repo() {
+  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null && rm -rf "$WORK/.git" &&
+  { gs sync --all >/dev/null 2>&1; assert_eq $? 1; } &&
+  assert_eq "$(sget "$WORK" result)" error &&
+  assert_contains "$(git config -f "$(sf_of "$WORK")" --get-all status.blocker)" "repo:invalid"
+}
+test_sync_unlisted_repo_no_status() {
+  gs init >/dev/null && make_repos && cd "$WORK" &&
+  gs sync >/dev/null 2>"$T/err" && assert_contains "$(cat "$T/err")" "git-sync install" &&
+  assert_no_file "$(sf_of "$WORK")"
+}
+test_status_file_rewritten_not_grown() {
+  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null &&
+  git -C "$WORK" remote add dead "$T/nope.git" &&
+  quiet "$GS" sync --all && quiet "$GS" sync --all && quiet "$GS" sync --all &&
+  assert_eq "$(git config -f "$(sf_of "$WORK")" --get-all status.blocker | wc -l | tr -d ' ')" 1 &&
+  ! ls -a "$GIT_SYNC_HOME/status" | grep -q tmp
+}
+test_last_success_carried_over() {
+  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null &&
+  (cd "$WORK" && gs sync >/dev/null) && ok_at=$(sget "$WORK" lastSuccess) && [ -n "$ok_at" ] &&
+  sleep 1 && git -C "$WORK" remote add dead "$T/nope.git" && (cd "$WORK" && gs sync >/dev/null);
+  assert_eq "$(sget "$WORK" result)" blocked && assert_eq "$(sget "$WORK" lastSuccess)" "$ok_at"
+}
+test_lock_held_skips() {
+  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null || return 1
+  sleep 30 & pid=$! ; mkdir "$GIT_SYNC_HOME/lock" && echo $pid > "$GIT_SYNC_HOME/lock/pid" &&
+  out=$(gs sync --all) ; rc=$? ; kill $pid ;
+  assert_eq $rc 0 && assert_contains "$out" "another run in progress" && assert_no_file "$(sf_of "$WORK")"
+}
+test_lock_stale_reclaimed() {
+  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null &&
+  mkdir "$GIT_SYNC_HOME/lock" && echo 999999 > "$GIT_SYNC_HOME/lock/pid" &&
+  gs sync --all >/dev/null && assert_file "$(sf_of "$WORK")" && [ ! -d "$GIT_SYNC_HOME/lock" ]
+}
+test_log_rotation() {
+  gs init >/dev/null && gs config --global log.maxSize 1K && make_repos && gs install "$WORK" >/dev/null &&
+  head -c 2000 /dev/zero | tr '\0' x > "$GIT_SYNC_HOME/git-sync.log" &&
+  gs sync --all >/dev/null && assert_file "$GIT_SYNC_HOME/git-sync.log.1" &&
+  [ "$(wc -c < "$GIT_SYNC_HOME/git-sync.log")" -lt 1024 ] &&
+  assert_contains "$(cat "$GIT_SYNC_HOME/git-sync.log")" "run start"
+}
+test_ssh_batchmode_env() {
+  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null &&
+  cat > "$T/bin/fakessh" <<'EOF'
+#!/bin/sh
+echo "GIT_SSH_COMMAND=${GIT_SSH_COMMAND:-}" >> "$STUB_DIR/ssh.env"; exit 1
+EOF
+  chmod +x "$T/bin/fakessh" &&
+  git -C "$WORK" remote add sshr "ssh://example.invalid/x.git" &&
+  ( PATH="$T/bin:$PATH" GIT_SSH="$T/bin/fakessh"; export GIT_SSH; cd "$WORK" && gs sync >/dev/null 2>&1 );
+  assert_eq "$(sget "$WORK" result)" blocked &&
+  assert_contains "$(git config -f "$(sf_of "$WORK")" --get-all status.blocker)" "fetch-failed:sshr"
+}
+
 # --- runner ---
 if [ $# -gt 0 ]; then TESTS="$*"; else
   TESTS=$(grep -E '^test_[a-z0-9_]+\(\)' "$0" | sed 's/().*//')

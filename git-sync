@@ -13,6 +13,10 @@ GS_AGENTS_DIR=${GIT_SYNC_AGENTS_DIR:-$HOME/Library/LaunchAgents}
 GS_LABEL=com.git-sync.agent
 GS_PLIST="$GS_AGENTS_DIR/$GS_LABEL.plist"
 GS_LAUNCHCTL=${GIT_SYNC_LAUNCHCTL:-launchctl}
+# Caller's original GIT_SSH_COMMAND (set-ness and value), restored per repo by git_env_for.
+GS_ORIG_SSH_SET=${GIT_SSH_COMMAND+set}
+GS_ORIG_SSH_CMD=${GIT_SSH_COMMAND-}
+GS_JOB=0
 
 # ---- util ----
 die() { echo "git-sync: $*" >&2; exit 1; }
@@ -206,7 +210,204 @@ log_msg() {
   return 0
 }
 
+log_rotate() {
+  local size max
+  [ -f "$GS_LOG" ] || return 0
+  size=$(wc -c < "$GS_LOG" | tr -d ' ')
+  max=$(parse_size "$(cfg_get log.maxSize)")
+  if [ "$size" -gt "$max" ]; then
+    mv -f "$GS_LOG" "$GS_LOG.1"
+  fi
+  return 0
+}
+
+lock_release() {
+  if [ "$(cat "$GS_LOCK/pid" 2>/dev/null)" = "$$" ]; then
+    rm -rf "$GS_LOCK"
+  fi
+  return 0
+}
+
+lock_acquire() {
+  local pid
+  if ! mkdir "$GS_LOCK" 2>/dev/null; then
+    pid=$(cat "$GS_LOCK/pid" 2>/dev/null)
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+      return 1
+    fi
+    rm -rf "$GS_LOCK"
+    mkdir "$GS_LOCK" 2>/dev/null || return 1
+  fi
+  echo "$$" > "$GS_LOCK/pid"
+  trap 'lock_release' EXIT
+  trap 'exit 1' INT TERM
+  return 0
+}
+
 # ---- sync engine ----
+SYNC_BLOCKERS=
+SYNC_NOTES=
+SYNC_RESULT=
+SYNC_FAILED_REMOTES=
+SYNC_PREV_KEYS=
+SYNC_REPO=
+
+sync_reset() {
+  SYNC_BLOCKERS=
+  SYNC_NOTES=
+  SYNC_RESULT=ok
+  SYNC_FAILED_REMOTES=
+  SYNC_PREV_KEYS=
+}
+
+# add_blocker KEY DETAIL
+add_blocker() {
+  local line="$1 ${2:-}"
+  if [ -n "$SYNC_BLOCKERS" ]; then
+    SYNC_BLOCKERS="$SYNC_BLOCKERS
+$line"
+  else
+    SYNC_BLOCKERS=$line
+  fi
+  log_msg WARN "$SYNC_REPO: blocker $line"
+}
+
+add_note() {
+  if [ -n "$SYNC_NOTES" ]; then
+    SYNC_NOTES="$SYNC_NOTES
+$1"
+  else
+    SYNC_NOTES=$1
+  fi
+}
+
+blocker_keys() {
+  [ -n "$SYNC_BLOCKERS" ] || return 0
+  printf '%s\n' "$SYNC_BLOCKERS" | awk '{print $1}'
+}
+
+first_line() {
+  printf '%s\n' "$1" | sed -n 1p
+}
+
+git_env_for() {
+  GIT_TERMINAL_PROMPT=0
+  export GIT_TERMINAL_PROMPT
+  if [ -n "$GS_ORIG_SSH_SET" ]; then
+    GIT_SSH_COMMAND=$GS_ORIG_SSH_CMD
+    export GIT_SSH_COMMAND
+  elif git -C "$1" config --get core.sshCommand >/dev/null 2>&1; then
+    unset GIT_SSH_COMMAND
+  else
+    GIT_SSH_COMMAND="ssh -o BatchMode=yes"
+    export GIT_SSH_COMMAND
+  fi
+}
+
+sync_fetch() {
+  local repo=$1 remotes r err
+  remotes=$(git -C "$repo" remote 2>/dev/null)
+  [ -n "$remotes" ] || return 0
+  while IFS= read -r r; do
+    [ -n "$r" ] || continue
+    if ! err=$(git -C "$repo" fetch --prune --quiet "$r" 2>&1 >/dev/null); then
+      add_blocker "fetch-failed:$r" "$(first_line "$err")"
+      SYNC_FAILED_REMOTES="${SYNC_FAILED_REMOTES:+$SYNC_FAILED_REMOTES }$r"
+    fi
+  done <<EOF
+$remotes
+EOF
+  return 0
+}
+
+# Implemented in Task 5.
+sync_ff() {
+  :
+}
+
+sync_maintenance() {
+  local err
+  if ! err=$(git -C "$1" \
+      -c maintenance.gc.enabled=false \
+      -c maintenance.commit-graph.enabled=true \
+      -c maintenance.loose-objects.enabled=true \
+      -c maintenance.incremental-repack.enabled=true \
+      -c maintenance.pack-refs.enabled=true \
+      maintenance run --auto --quiet 2>&1 >/dev/null); then
+    add_blocker maintenance:failed "$(first_line "$err")"
+  fi
+  return 0
+}
+
+# status_write REPO MODE: atomically rewrite the repo's status file from SYNC_* state.
+status_write() {
+  local repo=$1 mode=$2 sf tmp last line
+  sf=$(status_file "$repo")
+  tmp="$GS_STATUS_DIR/.tmp.$$"
+  mkdir -p "$GS_STATUS_DIR" || return 1
+  if [ "$SYNC_RESULT" = ok ]; then
+    last=$(now)
+  else
+    last=$(status_field "$repo" lastSuccess)
+  fi
+  rm -f "$tmp"
+  git config -f "$tmp" status.path "$repo"
+  git config -f "$tmp" status.mode "$mode"
+  git config -f "$tmp" status.lastRun "$(now)"
+  [ -z "$last" ] || git config -f "$tmp" status.lastSuccess "$last"
+  git config -f "$tmp" status.result "$SYNC_RESULT"
+  if [ -n "$SYNC_BLOCKERS" ]; then
+    while IFS= read -r line; do
+      git config -f "$tmp" --add status.blocker "$line"
+    done <<EOF
+$SYNC_BLOCKERS
+EOF
+  fi
+  if [ -n "$SYNC_NOTES" ]; then
+    while IFS= read -r line; do
+      git config -f "$tmp" --add status.note "$line"
+    done <<EOF
+$SYNC_NOTES
+EOF
+  fi
+  mv -f "$tmp" "$sf"
+}
+
+# sync_repo REPO LISTED
+sync_repo() {
+  local repo=$1 listed=$2 mode
+  SYNC_REPO=$repo
+  sync_reset
+  if [ ! -d "$repo" ]; then
+    SYNC_RESULT=missing
+    log_msg WARN "$repo: missing"
+    mode=$(cfg_get sync.mode)
+  elif ! git -C "$repo" rev-parse --git-dir >/dev/null 2>&1; then
+    SYNC_RESULT=error
+    mode=$(cfg_get sync.mode)
+    add_blocker repo:invalid "not a git repository"
+  else
+    mode=$(cfg_get sync.mode "$repo")
+    git_env_for "$repo"
+    case "$mode" in
+      maintain-and-fetch|fast-forward) sync_fetch "$repo" ;;
+    esac
+    if [ "$mode" = fast-forward ]; then
+      sync_ff "$repo"
+    fi
+    sync_maintenance "$repo"
+    if [ -n "$SYNC_BLOCKERS" ]; then
+      SYNC_RESULT=blocked
+    fi
+  fi
+  if [ "$listed" = 1 ]; then
+    SYNC_PREV_KEYS=$(git config -f "$(status_file "$repo")" --get-all status.blocker 2>/dev/null | awk '{print $1}')
+    status_write "$repo" "$mode"
+    if command -v notify_repo >/dev/null 2>&1; then notify_repo "$repo"; fi
+  fi
+  log_msg INFO "$repo: $SYNC_RESULT"
+  return 0
+}
 
 # ---- agent ----
 
@@ -309,6 +510,63 @@ cmd_list() {
     fi
     printf '%s  %s  %s\n' "$repo" "$mode" "$result"
   done
+}
+
+cmd_sync() {
+  local all=0 repo n=0 ok=0 blocked=0 failed=0 rc=0 keys line entries listed
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --all) all=1 ;;
+      --job) GS_JOB=1 ;;
+      *) usage_die "sync: unknown argument: $1" ;;
+    esac
+    shift
+  done
+  if [ "$all" = 1 ]; then
+    entries=$(list_repos)
+  else
+    repo=$(resolve_repo .) || usage_die "not in a git repository; use 'git-sync sync --all'"
+    entries=$repo
+  fi
+  log_rotate
+  if ! lock_acquire; then
+    log_msg INFO "another run in progress"
+    echo "another run in progress"
+    return 0
+  fi
+  n=$(printf '%s' "$entries" | grep -c .)
+  log_msg INFO "run start ($n repos)"
+  if command -v notify_run_start >/dev/null 2>&1; then notify_run_start "$n"; fi
+  if [ "$all" = 0 ]; then
+    if repo_listed "$repo"; then
+      listed=1
+    else
+      listed=0
+      echo "hint: not in sync list; run 'git-sync install' to track it" >&2
+    fi
+  else
+    listed=1
+  fi
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    sync_repo "$line" "$listed"
+    keys=$(blocker_keys | paste -sd, -)
+    if [ -n "$keys" ]; then
+      printf '%s: %s (%s)\n' "$line" "$SYNC_RESULT" "$keys"
+    else
+      printf '%s: %s\n' "$line" "$SYNC_RESULT"
+    fi
+    case "$SYNC_RESULT" in
+      ok) ok=$((ok + 1)) ;;
+      blocked) blocked=$((blocked + 1)); rc=1 ;;
+      *) failed=$((failed + 1)); rc=1 ;;
+    esac
+  done <<EOF
+$entries
+EOF
+  log_msg INFO "run end: $ok ok, $blocked blocked, $failed failed"
+  if command -v notify_run_end >/dev/null 2>&1; then notify_run_end "$ok" "$blocked" "$failed"; fi
+  return "$rc"
 }
 
 cmd_config() {
@@ -421,5 +679,6 @@ case "$cmd" in
   uninstall) shift; cmd_uninstall "$@" ;;
   list) shift; cmd_list "$@" ;;
   config) shift; cmd_config "$@" ;;
+  sync) shift; cmd_sync "$@" ;;
   *) usage_die "unknown command: $cmd" ;;
 esac
