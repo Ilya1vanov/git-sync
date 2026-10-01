@@ -529,18 +529,26 @@ test_status_compact() {
   out=$(gs status) &&
   assert_contains "$out" "Notifications: disabled" &&
   assert_not_contains "$out" "  mode:" && assert_not_contains "$out" "last success" &&
-  # repo with blocker + note: 2 lines, blockers win over notes
-  assert_contains "$out" "blocked  $WORK  " &&
+  # result, time-ago, path in aligned columns; blockers win over notes on line 2
+  assert_contains "$out" "blocked  < 1m ago       $WORK" &&
   assert_contains "$out" "
-           blocked by: fetch-failed:dead" &&
-  # repo with only a note: note on second line
-  assert_contains "$out" "ok       $T/other  " &&
+                        blocked by: fetch-failed:dead" &&
+  assert_contains "$out" "ok       < 1m ago       $T/other" &&
   assert_contains "$out" "
-           note: main: skipped (checked out)" &&
-  assert_contains "$out" "missing  $T/gone" &&
-  assert_contains "$out" "never    $T/fresh" &&
+                        note: main: skipped (checked out)" &&
+  assert_contains "$out" "missing  < 1m ago       $T/gone" &&
+  assert_contains "$out" "pending  never          $T/fresh" &&
   # header (3) + work (2) + other (2) + gone (1) + fresh (1)
   assert_eq "$(printf '%s\n' "$out" | wc -l | tr -d ' ')" 9
+}
+test_status_time_ago() {
+  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null && quiet "$GS" sync --all &&
+  sf=$(sf_of "$WORK") &&
+  for spec in "-30S|< 1m ago" "-1M|1 minute ago" "-5M|5 minutes ago" "-1H|1 hour ago" \
+              "-23H|23 hours ago" "-1d|1 day ago" "-40d|40 days ago"; do
+    git config -f "$sf" status.lastRun "$(date -v"${spec%%|*}" +%Y-%m-%dT%H:%M:%S%z)" &&
+    assert_contains "$(gs status)" "ok       $(printf '%-14s' "${spec#*|}") $WORK" || return 1
+  done
 }
 test_sync_path_argument() {
   gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null &&
@@ -559,25 +567,26 @@ test_sync_path_unlisted_and_errors() {
   { gs sync --all "$WORK" 2>/dev/null; assert_eq $? 2; } &&
   { gs sync "$WORK" "$WORK" 2>/dev/null; assert_eq $? 2; }
 }
-test_status_blocked_first() {
+test_status_attention_first_default() {
   gs init >/dev/null && make_repos &&
   git clone -q "$T/remote.git" "$T/a" && gs install "$T/a" >/dev/null &&
   git clone -q "$T/remote.git" "$T/b" && gs install "$T/b" >/dev/null &&
   git clone -q "$T/remote.git" "$T/gone" && gs install "$T/gone" >/dev/null &&
   git clone -q "$T/remote.git" "$T/c" && gs install "$T/c" >/dev/null &&
   git -C "$T/c" remote add dead "$T/nope.git" && quiet "$GS" sync --all && rm -rf "$T/gone" &&
-  # default keeps list order: a, b, gone, c
-  order=$(gs status | sed -n 's/^[a-z]* *\(\/[^ ]*\).*/\1/p' | tr '\n' ' ') &&
-  assert_eq "$order" "$T/a $T/b $T/gone $T/c " &&
-  # blocked first, then error, then missing, then the rest in list order
-  order=$(gs status --blocked-first | sed -n 's/^[a-z]* *\(\/[^ ]*\).*/\1/p' | tr '\n' ' ') &&
+  # default: blocked, then error, then missing, then the rest in list order
+  order=$(gs status | sed -En 's/^[a-z]+ +(< 1m ago|never) +(\/.*)$/\2/p' | tr '\n' ' ') &&
   assert_eq "$order" "$T/c $T/gone $T/a $T/b " &&
-  out=$(gs status -b --verbose) && assert_eq "$(printf '%s\n' "$out" | sed -n '4p')" "$T/c" &&
-  out=$(gs status --verbose -b) && assert_eq "$(printf '%s\n' "$out" | sed -n '4p')" "$T/c"
+  # --list-order keeps the sync list order
+  order=$(gs status --list-order | sed -En 's/^[a-z]+ +(< 1m ago|never) +(\/.*)$/\2/p' | tr '\n' ' ') &&
+  assert_eq "$order" "$T/a $T/b $T/gone $T/c " &&
+  out=$(gs status --verbose) && assert_eq "$(printf '%s\n' "$out" | sed -n '4p')" "$T/c" &&
+  out=$(gs status -l -v) && assert_eq "$(printf '%s\n' "$out" | sed -n '4p')" "$T/a" &&
+  { gs status --blocked-first 2>/dev/null; assert_eq $? 2; }
 }
 test_status_compact_tilde_and_bad_flag() {
   gs init >/dev/null && git init -q "$HOME/proj" && gs install "$HOME/proj" >/dev/null &&
-  assert_contains "$(gs status)" "never    ~/proj" &&
+  assert_contains "$(gs status)" "pending  never          ~/proj" &&
   { gs status --bogus 2>/dev/null; assert_eq $? 2; }
 }
 test_status_no_repos() {

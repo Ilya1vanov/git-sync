@@ -658,7 +658,7 @@ Commands:
   install -r <dir>             Add every repo directly inside <dir> (depth 1)
   uninstall [<path>]           Remove a repo from the sync list
   list                         List synced repos
-  status [--verbose] [--blocked-first]
+  status [--verbose] [--list-order]
                                Show agent state and per-repo sync status
   start                        Install and load the launchd agent
   stop                         Unload and remove the launchd agent
@@ -973,39 +973,51 @@ cmd_notifications() {
   fi
 }
 
-# status_compact_repo REPO: at most two lines — "<result> <path> <last run>",
-# then blocker keys if any, else notes if any.
+# time_ago ISO-TIMESTAMP: "< 1m ago", "5 minutes ago", "1 hour ago", "3 days ago";
+# "never" when empty, "unknown" when unparsable.
+time_ago() {
+  local then secs n unit
+  [ -n "$1" ] || { echo never; return 0; }
+  then=$(date -j -f '%Y-%m-%dT%H:%M:%S%z' "$1" +%s 2>/dev/null) || { echo unknown; return 0; }
+  secs=$(( $(date +%s) - then ))
+  if [ "$secs" -lt 60 ]; then echo "< 1m ago"; return 0
+  elif [ "$secs" -lt 3600 ]; then n=$((secs / 60)); unit=minute
+  elif [ "$secs" -lt 86400 ]; then n=$((secs / 3600)); unit=hour
+  else n=$((secs / 86400)); unit=day
+  fi
+  [ "$n" -eq 1 ] || unit="${unit}s"
+  echo "$n $unit ago"
+}
+
+# status_compact_repo REPO: at most two lines — "<result> <time ago> <path>" in
+# aligned columns, then blocker keys if any, else notes if any.
 status_compact_repo() {
-  local repo=$1 shown=$1 result when keys notes sf
+  local repo=$1 shown=$1 result keys notes sf
+  local indent='                        '
   case "$repo" in "$HOME"/*) shown="~${repo#"$HOME"}" ;; esac
-  if [ ! -d "$repo" ]; then
-    printf '%-8s %s\n' missing "$shown"
-    return 0
-  fi
   result=$(status_field "$repo" result)
-  if [ -z "$result" ]; then
-    printf '%-8s %s\n' never "$shown"
-    return 0
+  if [ ! -d "$repo" ]; then result=missing
+  elif [ -z "$result" ]; then result=pending
   fi
-  when=$(status_field "$repo" lastRun | sed 's/T/ /; s/:[0-9][0-9][+-][0-9]*$//')
-  printf '%-8s %s  %s\n' "$result" "$shown" "$when"
+  printf '%-8s %-14s %s\n' "$result" "$(time_ago "$(status_field "$repo" lastRun)")" "$shown"
+  [ -d "$repo" ] || return 0
   sf=$(status_file "$repo")
   keys=$(git config -f "$sf" --get-all status.blocker 2>/dev/null | cut -d' ' -f1 |
     paste -sd, - | sed 's/,/, /g')
   if [ -n "$keys" ]; then
-    echo "           blocked by: $keys"
+    echo "${indent}blocked by: $keys"
     return 0
   fi
   notes=$(git config -f "$sf" --get-all status.note 2>/dev/null | paste -sd';' - | sed 's/;/; /g')
-  [ -z "$notes" ] || echo "           note: $notes"
+  [ -z "$notes" ] || echo "${indent}note: $notes"
 }
 
-# status_repos BLOCKED_FIRST: listed repos, one per line. With 1, repos needing
-# attention come first (blocked, then error, then missing); order is otherwise
-# the list order.
+# status_repos LIST_ORDER: listed repos, one per line. By default repos needing
+# attention come first (blocked, then error, then missing), list order kept
+# within each group. With 1, plain list order.
 status_repos() {
   local repo rank i=0
-  if [ "$1" -eq 0 ]; then
+  if [ "$1" -eq 1 ]; then
     list_repos
     return 0
   fi
@@ -1024,11 +1036,11 @@ status_repos() {
 }
 
 cmd_status() {
-  local repo first=1 v verbose=0 blocked_first=0
+  local repo first=1 v verbose=0 list_order=0
   while [ $# -gt 0 ]; do
     case "$1" in
       -v|--verbose) verbose=1 ;;
-      -b|--blocked-first) blocked_first=1 ;;
+      -l|--list-order) list_order=1 ;;
       *) usage_die "unknown option for status: $1" ;;
     esac
     shift
@@ -1045,10 +1057,10 @@ cmd_status() {
     return 0
   fi
   if [ "$verbose" -eq 0 ]; then
-    status_repos "$blocked_first" | while IFS= read -r repo; do status_compact_repo "$repo"; done
+    status_repos "$list_order" | while IFS= read -r repo; do status_compact_repo "$repo"; done
     return 0
   fi
-  status_repos "$blocked_first" | while IFS= read -r repo; do
+  status_repos "$list_order" | while IFS= read -r repo; do
     [ "$first" -eq 1 ] || echo
     first=0
     echo "$repo"

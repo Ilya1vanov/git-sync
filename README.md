@@ -80,7 +80,7 @@ Unknown keys are rejected unless `--force` is given.
 
 ```
 git-sync init | install [<path>] | install -r <dir> | uninstall [<path>] | list
-git-sync status [--verbose] [--blocked-first]
+git-sync status [--verbose] [--list-order]
 git-sync start | stop
 git-sync config [--global] [--force] [--unset] [<key> [<value>]]
 git-sync sync [<path> | --all]
@@ -136,24 +136,28 @@ when Git's own thresholds say so. Git's maintenance scheduler
 
 ```sh
 git-sync status            # agent state, period, notifications, then per repo:
-                           #   <result> <path> <last run>, plus blocker keys
-                           #   (or notes) on a second line when there are any
+                           #   <result> <last run, time ago> <path>, plus
+                           #   blocker keys (or notes) on a second line
 git-sync status --verbose  # full per-repo detail: mode, last run/success,
                            #   every blocker with its detail, every note
-git-sync status -b         # repos needing attention first: blocked, error,
-                           #   missing, then the rest (combines with -v)
+git-sync status -l         # keep sync-list order (default: blocked, error,
+                           #   missing first, then the rest; combines with -v)
 git-sync list              # one line per repo: path, mode, last result
 ```
 
 Compact example:
 
 ```
-ok       ~/projects/app  2026-10-01 15:33
-blocked  ~/projects/api  2026-10-01 15:34
-           blocked by: develop:dirty, fetch-failed:upstream
-ok       ~/projects/web  2026-10-01 15:34
-           note: main: skipped (checked out)
+blocked  5 minutes ago  ~/projects/api
+                        blocked by: develop:dirty, fetch-failed:upstream
+missing  2 days ago     ~/projects/old
+ok       < 1m ago       ~/projects/app
+ok       5 minutes ago  ~/projects/web
+                        note: main: skipped (checked out)
+pending  never          ~/projects/new
 ```
+
+`pending` means the repo is registered but has not been synced yet.
 
 Files under `~/.git-sync` (override with `GIT_SYNC_HOME`):
 
