@@ -995,6 +995,14 @@ test_watch_list_sections() {
   gs uninstall -r "$T/p" --watch >/dev/null && gs uninstall -r "$T/q r" --watch >/dev/null &&
   assert_eq "$(gs list)" "$(printf '%s\n\n%s\n%s' "No repos." "Excluded:" "  $T/p/a")"
 }
+test_list_watch_only_roots() {
+  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null &&
+  out=$(gs list --watch) && assert_eq "$out" "" &&
+  mkdir "$T/p: q" "$T/r" && gs install -r "$T/p: q" --watch >/dev/null && gs install -r "$T/r" --watch >/dev/null &&
+  assert_eq "$(gs list --watch)" "$(printf '%s\n%s' "$T/p: q" "$T/r")" &&
+  { gs list --bogus 2>"$T/err"; assert_eq $? 2; } &&
+  assert_contains "$(cat "$T/err")" "usage: git-sync list [--watch]"
+}
 test_watch_new_note_24h() {
   gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null && mkdir "$T/p" &&
   gs install -r "$T/p" --watch >/dev/null && git clone -q "$T/remote.git" "$T/p/x" &&
@@ -1166,7 +1174,8 @@ test_hints_keys_match_cli() {
 test_hints_notifications() {
   assert_eq "$(hints notifications | cut -f1 | tr '\n' ' ')" "enable disable " &&
   assert_eq "$(hints notifications enable)" "" &&
-  assert_eq "$(hints list)" ""
+  assert_eq "$(hints list)" "$(printf -- '--watch\tOnly the watched roots')" &&
+  assert_eq "$(hints list --watch)" ""
 }
 test_hints_zsh_parity() {
   command -v zsh >/dev/null || { echo "    (skipped: no zsh)" >&2; return 0; }
@@ -1227,7 +1236,7 @@ test_zsh_complete_frontend() {
   assert_contains "$out" "files -/" &&
   assert_eq "$(zsh_complete git-sync install -r "")" "$(printf '%s\n%s' "describe --watch:Also install future clones in <dir>" "files -/")" &&
   assert_eq "$(zsh_complete git-sync config sync.period "")" "message number with optional s/m/h, at least 60s (e.g. 20m)" &&
-  assert_eq "$(zsh_complete git-sync list "")" ""
+  assert_eq "$(zsh_complete git-sync list "")" "describe --watch:Only the watched roots"
 }
 test_zsh_tab_inserts() {
   command -v zsh >/dev/null && command -v expect >/dev/null || { echo "    (skipped: no zsh or expect)" >&2; return 0; }

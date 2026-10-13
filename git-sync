@@ -792,7 +792,8 @@ Commands:
   install -r <dir> --watch     Same, and add new clones in <dir> at every sync --all
   uninstall [<path>]           Remove a repo from the sync list
   uninstall -r <dir> --watch   Stop watching <dir>; its repos stay installed
-  list                         List synced repos, watched roots and exclusions
+  list [--watch]               List synced repos, watched roots and exclusions
+                               (--watch: only the watched roots, one per line)
   status [--verbose] [--list-order]
                                Show agent state and per-repo sync status
   start                        Install and load the launchd agent
@@ -1017,6 +1018,14 @@ cmd_uninstall() {
 }
 
 cmd_list() {
+  case "${1:-}" in
+    "") ;;
+    --watch)
+      [ $# -eq 1 ] || usage_die "usage: git-sync list [--watch]"
+      list_roots
+      return 0 ;;
+    *) usage_die "usage: git-sync list [--watch]" ;;
+  esac
   list_repo_lines
   list_section "Watched roots:" "$(list_roots)"
   list_section "Excluded:" "$(list_excludes)"

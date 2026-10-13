@@ -137,6 +137,8 @@ __git_sync_hints() {
       elif [ "$npos" -eq 1 ] && [ "$has_unset" -eq 0 ]; then
         __git_sync_values "$key"
       fi ;;
+    list)
+      if [ $# -eq 0 ]; then __git_sync_hint --watch "Only the watched roots"; fi ;;
     notifications)
       if [ $# -eq 0 ]; then
         __git_sync_hint enable "Turn notifications on"

@@ -146,7 +146,7 @@ Only watch folders where you clone repos you trust.
 ## Commands
 
 ```
-git-sync init | install [<path>] | install -r <dir> [--watch] | uninstall [<path>] | list
+git-sync init | install [<path>] | install -r <dir> [--watch] | uninstall [<path>] | list [--watch]
 git-sync uninstall -r <dir> --watch
 git-sync status [--verbose] [--list-order]
 git-sync start | stop
@@ -230,6 +230,7 @@ git-sync status -l         # keep sync-list order (default: blocked, error,
                            #   missing first, then the rest; combines with -v)
 git-sync list              # one line per repo: path, mode, last result, then
                            #   "Watched roots:" and "Excluded:" sections if any
+git-sync list --watch      # only the watched roots, one path per line
 ```
 
 Compact example:
