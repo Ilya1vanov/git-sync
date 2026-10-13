@@ -440,6 +440,38 @@ test_offline_lock_held_reports_in_progress() {
   assert_eq $rc 0 && assert_eq "$out" "another run in progress" && assert_no_file "$T/route.calls" &&
   cmp -s "$GIT_SYNC_HOME/state" "$T/state.before"
 }
+test_offline_all_maintain_only_not_checked() {
+  gs init >/dev/null && make_repos &&
+  git clone -q "$T/remote.git" "$T/sec ond:repo" && (cd "$T/sec ond:repo" && gs config sync.mode maintain-only) &&
+  gs config --global sync.mode fast-forward && (cd "$WORK" && gs config sync.mode maintain-only) &&
+  gs install "$WORK" >/dev/null && gs install "$T/sec ond:repo" >/dev/null && touch "$T/offline" || return 1
+  gs sync --all --job >/dev/null; rc=$?
+  assert_eq $rc 0 && assert_no_file "$T/route.calls" &&
+  assert_eq "$(sget "$WORK" result)" ok && assert_eq "$(sget "$T/sec ond:repo" result)" ok
+}
+test_offline_manual_maintain_only_not_checked() {
+  gs init >/dev/null && make_repos && (cd "$WORK" && gs config sync.mode maintain-only) &&
+  gs install "$WORK" >/dev/null && touch "$T/offline" || return 1
+  out=$(cd "$T" && gs sync "$WORK" 2>&1); rc=$?
+  assert_eq $rc 0 && assert_no_file "$T/route.calls" && assert_not_contains "$out" offline &&
+  assert_eq "$(sget "$WORK" result)" ok
+}
+test_offline_mixed_modes_skipped() {
+  gs init >/dev/null && gs config --global sync.mode maintain-only && make_repos &&
+  git clone -q "$T/remote.git" "$T/fetch er" && (cd "$T/fetch er" && gs config sync.mode maintain-and-fetch) &&
+  gs install "$WORK" >/dev/null && gs install "$T/fetch er" >/dev/null && touch "$T/offline" || return 1
+  out=$(gs sync --all 2>&1); rc=$?
+  assert_eq $rc 1 && assert_eq "$out" offline && assert_file "$T/route.calls" &&
+  assert_no_file "$(sf_of "$WORK")" && assert_no_file "$(sf_of "$T/fetch er")"
+}
+test_offline_missing_repo_skipped() {
+  gs init >/dev/null && gs config --global sync.mode maintain-only && make_repos &&
+  mkdir "$T/gone" && git init -q "$T/gone" &&
+  gs install "$WORK" >/dev/null && gs install "$T/gone" >/dev/null && rm -rf "$T/gone" && touch "$T/offline" || return 1
+  out=$(gs sync --all 2>&1); rc=$?
+  assert_eq $rc 1 && assert_eq "$out" offline && assert_file "$T/route.calls" &&
+  assert_no_file "$(sf_of "$WORK")"
+}
 test_lock_reused_pid_reclaimed() {
   gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null || return 1
   sleep 30 & pid=$! ; mkdir "$GIT_SYNC_HOME/lock" && echo $pid > "$GIT_SYNC_HOME/lock/pid" &&

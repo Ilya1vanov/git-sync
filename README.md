@@ -131,6 +131,10 @@ git-sync help
   prints `offline` and exits 1. Having a default route does not mean the
   remotes are reachable (captive portals, networks without internet), so such
   runs still produce `fetch-failed` blockers.
+- Runs that only maintain need no network: when every target repo's effective
+  `sync.mode` is `maintain-only`, the offline check is not made and the run
+  syncs normally, even offline. A run with any fetching repo, or with a missing
+  or invalid repo, still makes the check, and an offline skip covers the whole run.
 
 ## Results and blockers
 
