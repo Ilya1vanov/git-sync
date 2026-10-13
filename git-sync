@@ -36,7 +36,7 @@ require_init() {
 # ---- config ----
 cfg_known() {
   case "$1" in
-    sync.period|sync.repo|sync.mode|sync.branches|sync.ffCheckedOut|sync.jobs|sync.jitter|sync.disableOfflineCheck|log.maxSize|notify.enabled|notify.events) return 0 ;;
+    sync.period|sync.repo|sync.root|sync.exclude|sync.mode|sync.branches|sync.ffCheckedOut|sync.jobs|sync.jitter|sync.disableOfflineCheck|log.maxSize|notify.enabled|notify.events) return 0 ;;
   esac
   return 1
 }
@@ -211,6 +211,22 @@ list_repos() {
 
 repo_listed() {
   list_repos | grep -Fxq -- "$1"
+}
+
+list_roots() {
+  git config -f "$GS_CONFIG" --get-all sync.root 2>/dev/null
+}
+
+root_watched() {
+  list_roots | grep -Fxq -- "$1"
+}
+
+list_excludes() {
+  git config -f "$GS_CONFIG" --get-all sync.exclude 2>/dev/null
+}
+
+repo_excluded() {
+  list_excludes | grep -Fxq -- "$1"
 }
 
 # ---- log/lock/status ----
@@ -543,8 +559,9 @@ sync_maintenance() {
 
 # status_write REPO MODE: atomically rewrite the repo's status file from SYNC_* state.
 status_write() {
-  local repo=$1 mode=$2 sf tmp last line
+  local repo=$1 mode=$2 sf tmp last line wi
   sf=$(status_file "$repo")
+  wi=$(status_field "$repo" watchInstalled)
   tmp="$GS_STATUS_DIR/.tmp.$$"
   mkdir -p "$GS_STATUS_DIR" || return 1
   if [ "$SYNC_RESULT" = ok ]; then
@@ -558,6 +575,7 @@ status_write() {
   git config -f "$tmp" status.lastRun "$(now)"
   [ -z "$last" ] || git config -f "$tmp" status.lastSuccess "$last"
   git config -f "$tmp" status.result "$SYNC_RESULT"
+  [ -z "$wi" ] || git config -f "$tmp" status.watchInstalled "$wi"
   if [ -n "$SYNC_BLOCKERS" ]; then
     while IFS= read -r line; do
       git config -f "$tmp" --add status.blocker "$line"
@@ -771,8 +789,11 @@ Commands:
   init                         Create ~/.git-sync with default config
   install [<path>]             Add a repo (default: current) to the sync list
   install -r <dir>             Add every repo directly inside <dir> (depth 1)
+  install -r <dir> --watch     Same, and add new clones in <dir> at every sync --all
   uninstall [<path>]           Remove a repo from the sync list
-  list                         List synced repos
+  uninstall -r <dir> --watch   Stop watching <dir>; its repos stay installed
+  list [--watch]               List synced repos, watched roots and exclusions
+                               (--watch: only the watched roots, one per line)
   status [--verbose] [--list-order]
                                Show agent state and per-repo sync status
   start                        Install and load the launchd agent
@@ -808,8 +829,8 @@ cmd_init() {
 
 cmd_install() {
   if [ "${1:-}" = "-r" ]; then
-    [ $# -eq 2 ] || usage_die "usage: git-sync install -r <dir>"
-    install_children "$2"
+    shift
+    install_root "$@"
     return
   fi
   local target=${1:-.} repo
@@ -819,11 +840,13 @@ cmd_install() {
     log_msg WARN "install: $target is a linked worktree; registered $repo"
   fi
   if repo_listed "$repo"; then
+    install_unexclude "$repo"
     echo "Already installed: $repo"
     return 0
   fi
   git config -f "$GS_CONFIG" --add sync.repo "$repo" || die "cannot write $GS_CONFIG"
   log_msg INFO "install: $repo"
+  install_unexclude "$repo"
   if git -C "$repo" remote | grep -qx origin &&
      ! git -C "$repo" symbolic-ref -q refs/remotes/origin/HEAD >/dev/null; then
     GIT_TERMINAL_PROMPT=0 git -C "$repo" remote set-head origin --auto >/dev/null 2>&1 ||
@@ -832,16 +855,69 @@ cmd_install() {
   echo "Installed: $repo"
 }
 
-# install_children DIR: installs every immediate subdirectory of DIR that is a
-# git working tree (has a .git dir or file). Not recursive beyond depth 1.
+# install_unexclude REPO: an explicit install undoes the repo's exclusion.
+# Called only once REPO is in the sync list, so a failed write never loses it.
+install_unexclude() {
+  repo_excluded "$1" || return 0
+  git config -f "$GS_CONFIG" --fixed-value --unset-all sync.exclude "$1" || die "cannot write $GS_CONFIG"
+  log_msg INFO "install: $1 no longer excluded"
+}
+
+# parse_root_args USAGE ARG...: sets ROOT_DIR and ROOT_WATCH from "<dir> [--watch]"
+# (--watch may come first).
+parse_root_args() {
+  local usage=$1
+  shift
+  ROOT_DIR= ROOT_WATCH=0
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --watch) ROOT_WATCH=1 ;;
+      -*) usage_die "$usage" ;;
+      *) [ -z "$ROOT_DIR" ] || usage_die "$usage"; ROOT_DIR=$1 ;;
+    esac
+    shift
+  done
+  [ -n "$ROOT_DIR" ] || usage_die "$usage"
+}
+
+# install_root <dir> [--watch]: install the children of <dir>; with --watch,
+# also add <dir> to the watched roots.
+install_root() {
+  local dir rc=0
+  parse_root_args "usage: git-sync install -r <dir> [--watch]" "$@"
+  [ -d "$ROOT_DIR" ] || die "not a directory: $ROOT_DIR"
+  if [ "$ROOT_WATCH" = 0 ]; then
+    install_children "$ROOT_DIR"
+    return
+  fi
+  dir=$(cd -P "$ROOT_DIR" && pwd) || die "cannot read $ROOT_DIR"
+  if root_watched "$dir"; then
+    echo "Already watched: $dir"
+    return 0
+  fi
+  install_children "$dir" 1 || rc=$?
+  git config -f "$GS_CONFIG" --add sync.root "$dir" || die "cannot write $GS_CONFIG"
+  log_msg INFO "watch: $dir"
+  echo "Watching: $dir"
+  return "$rc"
+}
+
+# install_children DIR [ALLOW_EMPTY]: installs every immediate subdirectory of
+# DIR that is a git working tree (has a .git dir or file). Not recursive beyond
+# depth 1. ALLOW_EMPTY=1: finding no repos is not an error.
 install_children() {
-  local dir=$1 child out found=0 added=0 already=0 failed=0
+  local dir=$1 allow_empty=${2:-0} child repo out found=0 added=0 already=0 failed=0 excluded=0
   [ -d "$dir" ] || die "not a directory: $dir"
   for child in "$dir"/*/; do
     child=${child%/}
     [ -d "$child" ] && [ -e "$child/.git" ] || continue
     found=$((found + 1))
     # Subshell: cmd_install calls die on failure; keep going with the rest.
+    # Excluded repos stay out; only `install <repo>` brings one back.
+    if repo=$(resolve_repo "$child") && repo_excluded "$repo"; then
+      excluded=$((excluded + 1))
+      continue
+    fi
     if out=$(cmd_install "$child"); then
       echo "$out"
       case "$out" in
@@ -852,12 +928,71 @@ install_children() {
       failed=$((failed + 1))
     fi
   done
-  [ "$found" -gt 0 ] || die "no git repositories found in $dir"
-  echo "$added installed, $already already installed, $failed failed"
+  [ "$found" -gt 0 ] || [ "$allow_empty" = 1 ] || die "no git repositories found in $dir"
+  echo "$added installed, $already already installed, $failed failed, $excluded excluded"
   [ "$failed" -eq 0 ]
 }
 
+# watch_scan: install every new repo found directly inside a watched root (same
+# child rules as install_children). Runs under the lock, so no duplicates.
+watch_scan() {
+  local root child repo sf known nl='
+'
+  # Listed and excluded paths, read once. Both are canonical main-worktree
+  # paths, so a child already among them needs no git call at all.
+  known="$nl$(list_repos)$nl$(list_excludes)$nl"
+  # Warnings never change the exit code or notifications; stderr only in manual runs.
+  list_roots | while IFS= read -r root; do
+    if ! [ -d "$root" ] || ! [ -r "$root" ] || ! [ -x "$root" ]; then
+      log_msg WARN "watched root missing or unreadable: $root"
+      [ "$GS_JOB" = 1 ] || warn "watched root missing or unreadable: $root"
+      continue
+    fi
+    for child in "$root"/*/; do
+      child=${child%/}
+      [ -d "$child" ] && [ -e "$child/.git" ] || continue
+      case "$known" in *"$nl$child$nl"*) continue ;; esac
+      if ! repo=$(resolve_repo "$child"); then
+        log_msg WARN "skipped $child: not a usable repository (watched root $root)"
+        continue
+      fi
+      case "$known" in *"$nl$repo$nl"*) continue ;; esac
+      git config -f "$GS_CONFIG" --add sync.repo "$repo" || continue
+      known="$known$repo$nl"
+      log_msg INFO "installed $repo (watched root $root)"
+      # Install time drives the 24h `new` note in status; status_write keeps it.
+      sf=$(status_file "$repo")
+      mkdir -p "$GS_STATUS_DIR" && rm -f "$sf" &&
+        git config -f "$sf" status.path "$repo" &&
+        git config -f "$sf" status.watchInstalled "$(now)"
+    done
+  done
+}
+
+# uninstall_root <dir> --watch: stop watching <dir>; its repos and exclusions stay.
+uninstall_root() {
+  local dir parent
+  parse_root_args "usage: git-sync uninstall -r <dir> --watch" "$@"
+  [ "$ROOT_WATCH" = 1 ] || usage_die "usage: git-sync uninstall -r <dir> --watch"
+  # The root may be gone already: canonicalize its parent instead.
+  if ! dir=$(cd -P "$ROOT_DIR" 2>/dev/null && pwd); then
+    dir=${ROOT_DIR%/}
+    if parent=$(cd -P "$(dirname "$dir")" 2>/dev/null && pwd); then
+      dir="$parent/$(basename "$dir")"
+    fi
+  fi
+  root_watched "$dir" || die "not a watched root: $dir"
+  git config -f "$GS_CONFIG" --fixed-value --unset-all sync.root "$dir" || die "cannot write $GS_CONFIG"
+  log_msg INFO "unwatch: $dir"
+  echo "Unwatched: $dir"
+}
+
 cmd_uninstall() {
+  if [ "${1:-}" = "-r" ]; then
+    shift
+    uninstall_root "$@"
+    return
+  fi
   local target=${1:-.} repo parent
   if [ -d "$target" ] && repo=$(resolve_repo "$target"); then
     :
@@ -874,9 +1009,37 @@ cmd_uninstall() {
   rm -f "$(status_file "$repo")"
   log_msg INFO "uninstall: $repo"
   echo "Uninstalled: $repo"
+  # Under a watched root (depth 1): exclude it so the next scan doesn't add it back.
+  if root_watched "$(dirname "$repo")" && ! repo_excluded "$repo"; then
+    git config -f "$GS_CONFIG" --add sync.exclude "$repo" || die "cannot write $GS_CONFIG"
+    log_msg INFO "exclude: $repo"
+    echo "Excluded from watched root $(dirname "$repo")"
+  fi
 }
 
 cmd_list() {
+  case "${1:-}" in
+    "") ;;
+    --watch)
+      [ $# -eq 1 ] || usage_die "usage: git-sync list [--watch]"
+      list_roots
+      return 0 ;;
+    *) usage_die "usage: git-sync list [--watch]" ;;
+  esac
+  list_repo_lines
+  list_section "Watched roots:" "$(list_roots)"
+  list_section "Excluded:" "$(list_excludes)"
+  return 0
+}
+
+# list_section HEADER LINES: a blank line, HEADER, then LINES indented; nothing if empty.
+list_section() {
+  [ -n "$2" ] || return 0
+  printf '\n%s\n' "$1"
+  printf '%s\n' "$2" | sed 's/^/  /'
+}
+
+list_repo_lines() {
   local repo mode result
   if [ -z "$(list_repos)" ]; then
     echo "No repos."
@@ -909,12 +1072,11 @@ cmd_sync() {
     shift
   done
   [ "$all" = 0 ] || [ -z "$path" ] || usage_die "sync: use either --all or <path>"
-  if [ "$all" = 1 ]; then
-    entries=$(list_repos)
-  elif [ -n "$path" ]; then
+  # --all reads its entries after the watch scan, under the lock.
+  if [ -n "$path" ]; then
     repo=$(resolve_repo "$path") || die "not a git repository: $path"
     entries=$repo
-  else
+  elif [ "$all" = 0 ]; then
     repo=$(resolve_repo .) || usage_die "not in a git repository; use 'git-sync sync --all'"
     entries=$repo
   fi
@@ -923,6 +1085,10 @@ cmd_sync() {
     log_msg INFO "another run in progress"
     echo "another run in progress"
     return 0
+  fi
+  if [ "$all" = 1 ]; then
+    watch_scan
+    entries=$(list_repos)
   fi
   if [ "$(cfg_get sync.disableOfflineCheck)" != true ] && needs_offline_check "$entries" && ! is_online; then
     log_msg INFO "offline, run skipped"
@@ -1014,13 +1180,14 @@ cmd_config() {
     return 0
   fi
 
-  if [ "$key" = sync.repo ]; then
-    if [ "$nargs" -ge 2 ] || [ "$unset" -eq 1 ]; then
-      usage_die "sync.repo is managed by 'git-sync install/uninstall'"
-    fi
-    git config -f "$GS_CONFIG" --get-all sync.repo
-    return 0
-  fi
+  case "$key" in
+    sync.repo|sync.root|sync.exclude)
+      if [ "$nargs" -ge 2 ] || [ "$unset" -eq 1 ]; then
+        usage_die "$key is managed by 'git-sync install/uninstall'"
+      fi
+      git config -f "$GS_CONFIG" --get-all "$key"
+      return ;;
+  esac
 
   if ! cfg_known "$key" && [ "$force" -eq 0 ]; then
     usage_die "unknown key: $key"
@@ -1186,19 +1353,25 @@ FNR == 1 { p = "" ; delete f }
   else f[k] = (k == "blocker" || k == "note") && (k in f) ? f[k] "\001" v : v
 }
 # Each file ends with its fields collected; store them under its path.
-{ if (p != "") { for (k in f) S[p, k] = f[k]; has[p] = 1 } }
+{ if (p != "") for (k in f) S[p, k] = f[k] }
 END {
   ind = "                        "
   for (r = 0; r <= 3; r++) {
     for (j = 1; j <= n; j++) {
       repo = rp[j]
-      res = !ex[j] ? "missing" : (repo in has ? S[repo, "result"] : "pending")
+      # A watch install writes a status file before the first sync: no result yet.
+      res = !ex[j] ? "missing" : ((repo, "result") in S ? S[repo, "result"] : "pending")
       rank = list_order ? 0 : (res == "blocked" ? 0 : res == "error" ? 1 : res == "missing" ? 2 : 3)
       if (rank != r) continue
       shown = repo
       if (index(repo, home "/") == 1) shown = "~" substr(repo, length(home) + 1)
       blk = (repo, "blocker") in S ? S[repo, "blocker"] : ""
       nts = (repo, "note") in S ? S[repo, "note"] : ""
+      # `new`: installed by a watch less than 24h ago.
+      if ((repo, "watchinstalled") in S) {
+        e = iso2epoch(S[repo, "watchinstalled"])
+        if (e >= 0 && now - e < 86400) nts = "new" (nts != "" ? "\001" nts : "")
+      }
       if (!verbose) {
         printf "%-8s %-14s %s\n", res, ago((repo, "lastrun") in S ? S[repo, "lastrun"] : ""), shown
         if (!ex[j]) continue
@@ -1215,11 +1388,7 @@ END {
       print repo
       if (!ex[j]) { print "  result:        missing"; continue }
       print "  mode:          " ((repo, "mode") in S ? S[repo, "mode"] : cmode[j])
-      if (!(repo in has)) {
-        print "  result:        never"; print "  last run:      never"; print "  last success:  never"
-        continue
-      }
-      print "  result:        " S[repo, "result"]
+      print "  result:        " (res == "pending" ? "never" : res)
       print "  last run:      " ((repo, "lastrun") in S ? S[repo, "lastrun"] : "never")
       print "  last success:  " ((repo, "lastsuccess") in S ? S[repo, "lastsuccess"] : "never")
       if (blk != "") { cnt = split(blk, b, "\001"); for (q = 1; q <= cnt; q++) print "  blocker:       " b[q] }

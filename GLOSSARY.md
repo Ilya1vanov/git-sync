@@ -7,6 +7,16 @@ Keeps local git clones fresh by fetching and fast-forwarding only when safe; any
 **Run**:
 One invocation of `git-sync sync`, covering one repo or every registered repo.
 
+**Sync list**:
+The repos a run with `--all` covers. _Install_ is the verb for adding a repo to it.
+_Avoid_: register
+
+**Watched root**:
+A folder whose depth-1 repos are added to the sync list automatically at each run with `--all`.
+
+**Exclusion**:
+A repo under a watched root that the user removed and that git-sync must not add back.
+
 **Job run**:
 A run started by the agent on its schedule. Only job runs notify.
 _Avoid_: scheduled sync, background run
