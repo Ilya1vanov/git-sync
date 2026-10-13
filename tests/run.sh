@@ -590,6 +590,77 @@ test_sync_env_respects_core_sshcommand() {
   a=$(cat "$T/ssh.args" 2>/dev/null) &&
   assert_contains "$a" "--marker" && assert_not_contains "$a" "BatchMode=yes"
 }
+# hang_stub [ignore-term]: fake ssh that never finishes. Its command line holds
+# $T/bin/ssh, a unique marker for leak checks (`marked`).
+hang_stub() {
+  { echo '#!/bin/sh'
+    [ "${1:-}" = ignore-term ] && echo "trap '' TERM"
+    echo 'while :; do sleep 1; done'; } > "$T/bin/ssh"
+  chmod +x "$T/bin/ssh"
+}
+# marked: PIDs of live processes carrying the stub marker or a sleeper of N seconds ($1).
+marked() { pgrep -f "$T/bin/ssh"; [ -z "${1:-}" ] || pgrep -fx "sleep $1"; }
+# gs_ssh ARGS...: run git-sync with the fake ssh first on PATH and no inherited ssh command.
+gs_ssh() { ( unset GIT_SSH_COMMAND GIT_SSH; PATH="$T/bin:$PATH"; gs "$@" ); }
+
+test_fetch_timeout_hung_remote() {
+  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null && hang_stub &&
+  gs config --global sync.fetchTimeout 2s && gs config --global sync.branches develop &&
+  git -C "$WORK" remote add up "$T/remote.git" &&
+  push_commit develop d2 && git -C "$WORK" fetch -q origin &&
+  old=$(git -C "$WORK" rev-parse develop) &&
+  git -C "$WORK" remote set-url origin "ssh://example.invalid/x.git" || return 1
+  start=$(date +%s)
+  out=$(cd "$WORK" && gs_ssh sync 2>&1); rc=$?
+  el=$(( $(date +%s) - start ))
+  assert_eq $rc 1 && assert_eq "$out" "$WORK: blocked (fetch-timeout:origin)" &&
+  [ "$el" -lt 8 ] || { echo "    took ${el}s"; return 1; }
+  assert_eq "$(blockers)" "fetch-timeout:origin timed out after 2s" &&
+  assert_eq "$(git -C "$WORK" rev-parse develop)" "$old" &&
+  git -C "$WORK" rev-parse -q --verify refs/remotes/up/develop >/dev/null &&
+  assert_eq "$(marked)" "" &&
+  assert_contains "$(gs status -v)" "  blocker:       fetch-timeout:origin timed out after 2s" &&
+  assert_not_contains "$(cat "$GIT_SYNC_HOME/git-sync.log")" "Terminated" || return 1
+  git -C "$WORK" remote set-url origin "$T/remote.git" &&
+  (cd "$WORK" && gs_ssh sync >/dev/null) && assert_eq "$(blockers)" "" &&
+  assert_eq "$(git -C "$WORK" rev-parse develop)" "$(git -C "$T/remote.git" rev-parse develop)"
+}
+test_fetch_timeout_normal_fetch_unchanged() {
+  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null &&
+  gs config --global sync.fetchTimeout 47 && push_commit main m2 && git -C "$WORK" checkout -q develop &&
+  out=$(cd "$WORK" && gs sync 2>&1) && assert_eq "$out" "$WORK: ok" &&
+  assert_eq "$(git -C "$WORK" rev-parse main)" "$(git -C "$T/remote.git" rev-parse main)" &&
+  assert_eq "$(marked 47)" ""
+}
+test_fetch_timeout_parallel_and_notify() {
+  gs init >/dev/null && gs notifications enable >/dev/null && gs config --global sync.jobs 2 &&
+  gs config --global sync.fetchTimeout 2 && gs config --global sync.branches develop &&
+  make_repos && gs install "$WORK" >/dev/null && ssh_stub &&
+  git clone -q "$T/remote.git" "$T/r2" && git -C "$T/r2" branch -q --track develop origin/develop &&
+  gs install "$T/r2" >/dev/null &&
+  git -C "$WORK" remote add sshr "ssh://example.invalid/x.git" &&
+  quiet gs_ssh sync --all --job && assert_contains "$(ncalls)" "fetch-failed:sshr" &&
+  rm -f "$T/notify.calls" && hang_stub && push_commit develop d2 || return 1
+  out=$(gs_ssh sync --all 2>&1); rc=$?
+  assert_eq $rc 1 && assert_contains "$out" "$WORK: blocked (fetch-timeout:sshr)" &&
+  assert_contains "$out" "$T/r2: ok" && assert_not_contains "$out" "Terminated" &&
+  assert_eq "$(git -C "$T/r2" rev-parse develop)" "$(git -C "$T/remote.git" rev-parse develop)" &&
+  assert_eq "$(git -C "$WORK" rev-parse develop)" "$(git -C "$T/remote.git" rev-parse develop)" &&
+  assert_eq "$(marked)" "" || return 1
+  # a switch from fetch-failed to fetch-timeout is newly blocked
+  ssh_stub && quiet gs_ssh sync --all --job && rm -f "$T/notify.calls" && hang_stub &&
+  quiet gs_ssh sync --all --job && assert_contains "$(ncalls)" "git-sync: work|fetch-timeout:sshr" &&
+  assert_eq "$(marked)" ""
+}
+test_fetch_timeout_kill_escalation() {
+  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null && hang_stub ignore-term &&
+  gs config --global sync.fetchTimeout 1 &&
+  git -C "$WORK" remote set-url origin "ssh://example.invalid/x.git" || return 1
+  out=$(cd "$WORK" && gs_ssh sync 2>&1)
+  assert_eq "$out" "$WORK: blocked (fetch-timeout:origin)" &&
+  assert_eq "$(blockers)" "fetch-timeout:origin timed out after 1" &&
+  assert_eq "$(marked)" ""
+}
 
 ffsetup() { gs init >/dev/null && make_repos "$@" && gs install "$WORK" >/dev/null; }
 blockers() { git config -f "$(sf_of "$WORK")" --get-all status.blocker; }

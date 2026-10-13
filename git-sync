@@ -380,19 +380,72 @@ git_env_for() {
   fi
 }
 
+# Active fetch (process group id) and its sleeper (pgid); empty when none runs.
+GS_FETCH_PGID=
+GS_SLEEPER_PGID=
+GS_FETCH_GRACE=5
+
+# fetch_bounded REPO REMOTE SECS TMPDIR: one `git fetch`, cut off after SECS.
+# The fetch and the sleeper each run in their own process group (job control
+# is on only while starting them), so signals reach every descendant (ssh,
+# credential helpers, proxies). On timeout the sleeper sends TERM to the
+# fetch's group, waits up to GS_FETCH_GRACE seconds, then sends KILL; it
+# touches TMPDIR/timeout first. Returns git's exit status; stderr goes to
+# TMPDIR/err. `wait` stderr is discarded to hide job-control notices.
+fetch_bounded() {
+  local repo=$1 r=$2 secs=$3 d=$4 rc
+  rm -f "$d/timeout"
+  set -m
+  git -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=60 -C "$repo" fetch --prune --quiet "$r" >/dev/null 2>"$d/err" &
+  GS_FETCH_PGID=$!
+  (
+    sleep "$secs"
+    : > "$d/timeout"
+    kill -TERM -"$GS_FETCH_PGID" 2>/dev/null
+    kill -CONT -"$GS_FETCH_PGID" 2>/dev/null
+    n=0
+    while [ "$n" -lt $((GS_FETCH_GRACE * 5)) ] && kill -0 -"$GS_FETCH_PGID" 2>/dev/null; do
+      sleep 0.2; n=$((n + 1))
+    done
+    kill -KILL -"$GS_FETCH_PGID" 2>/dev/null
+    exit 0
+  ) </dev/null >/dev/null 2>&1 &
+  GS_SLEEPER_PGID=$!
+  set +m
+  wait "$GS_FETCH_PGID" 2>/dev/null
+  rc=$?
+  # Sleeper fired: let it finish the grace/KILL sequence. Otherwise stop it.
+  [ -e "$d/timeout" ] || kill -TERM -"$GS_SLEEPER_PGID" 2>/dev/null
+  wait "$GS_SLEEPER_PGID" 2>/dev/null
+  GS_FETCH_PGID=
+  GS_SLEEPER_PGID=
+  return "$rc"
+}
+
 sync_fetch() {
-  local repo=$1 remotes r err
+  local repo=$1 remotes r err limit secs d
   remotes=$(git -C "$repo" remote 2>/dev/null)
   [ -n "$remotes" ] || return 0
+  limit=$(cfg_get sync.fetchTimeout "$repo")
+  secs=$(parse_period "$limit")
+  d="$GS_HOME/fetch.$$"
+  mkdir -p "$d"
   while IFS= read -r r; do
     [ -n "$r" ] || continue
-    if ! err=$(git -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=60 -C "$repo" fetch --prune --quiet "$r" 2>&1 >/dev/null); then
-      add_blocker "fetch-failed:$r" "$(first_line "$err")"
-      SYNC_FAILED_REMOTES="${SYNC_FAILED_REMOTES:+$SYNC_FAILED_REMOTES }$r"
+    if fetch_bounded "$repo" "$r" "$secs" "$d"; then
+      [ -e "$d/timeout" ] || continue
     fi
+    if [ -e "$d/timeout" ]; then
+      add_blocker "fetch-timeout:$r" "timed out after $limit"
+    else
+      err=$(cat "$d/err" 2>/dev/null)
+      add_blocker "fetch-failed:$r" "$(first_line "$err")"
+    fi
+    SYNC_FAILED_REMOTES="${SYNC_FAILED_REMOTES:+$SYNC_FAILED_REMOTES }$r"
   done <<EOF
 $remotes
 EOF
+  rm -rf "$d"
   return 0
 }
 
