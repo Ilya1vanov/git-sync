@@ -81,6 +81,7 @@ Resolution order: per-repo value, then global value, then default. Inspect with
 | `sync.mode` | yes | `fast-forward` | `maintain-only`, `maintain-and-fetch`, `fast-forward` |
 | `sync.branches` | yes | unset | space-separated branch names |
 | `sync.ffCheckedOut` | yes | `false` | `true`, `false` |
+| `sync.fetchTimeout` | yes | `5m` | number with optional `s`/`m`/`h`, 30 s to 1 h; longest one fetch from one remote may run |
 | `sync.jobs` | no | `8` | repos synced in parallel by `sync --all`, 1–64 |
 | `sync.jitter` | no | `5s` | random 0–N s delay before each repo in `sync --all`, 0–60 |
 | `sync.disableOfflineCheck` | no | `false` | `true`, `false` (`true`: never skip a run as offline) |

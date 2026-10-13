@@ -51,6 +51,8 @@ EOF
   chmod +x "$T/bin/launchctl" "$T/bin/notify" "$T/bin/route"
   export STUB_DIR="$T" GIT_SYNC_LAUNCHCTL="$T/bin/launchctl" GIT_SYNC_NOTIFY_CMD="$T/bin/notify"
   export GIT_SYNC_ROUTE="$T/bin/route"
+  # lowers the 30s minimum of sync.fetchTimeout so tests can use short timeouts
+  export GIT_SYNC_FETCH_TIMEOUT_MIN=1
   cd "$T" || exit 1
 }
 
@@ -196,6 +198,41 @@ test_config_set_global_and_validate() {
   gs config --global notify.events "finished blocked" &&
   gs config --global log.maxSize 512K && gs config --global sync.period 90 &&
   assert_eq "$(gs config sync.period)" 90
+}
+test_config_fetch_timeout_default_and_valid_values() {
+  gs init >/dev/null &&
+  assert_eq "$(gs config sync.fetchTimeout)" 5m &&
+  assert_contains "$(gs config)" "sync.fetchTimeout = 5m (default)" &&
+  for v in 30s 5m 1h 90 3600s 60m; do
+    gs config --global sync.fetchTimeout "$v" && assert_eq "$(gs config sync.fetchTimeout)" "$v" || return 1
+  done
+}
+test_config_fetch_timeout_rejects_invalid() {
+  unset GIT_SYNC_FETCH_TIMEOUT_MIN
+  gs init >/dev/null &&
+  for v in 29s 29 3601 61m 2h abc 0 5x 1.5m ""; do
+    { gs config --global sync.fetchTimeout "$v" 2>"$T/err"; [ $? -ne 0 ]; } &&
+    assert_contains "$(cat "$T/err")" "sync.fetchTimeout must" || { echo "    accepted [$v]"; return 1; }
+  done &&
+  assert_contains "$(gs config)" "sync.fetchTimeout = 5m (default)"
+}
+test_config_fetch_timeout_min_test_hook() {
+  gs init >/dev/null &&
+  gs config --global sync.fetchTimeout 2s && assert_eq "$(gs config sync.fetchTimeout)" 2s &&
+  { GIT_SYNC_FETCH_TIMEOUT_MIN=10 gs config --global sync.fetchTimeout 9 2>"$T/err"; [ $? -ne 0 ]; } &&
+  GIT_SYNC_FETCH_TIMEOUT_MIN=10 gs config --global sync.fetchTimeout 10 &&
+  { gs config --global sync.fetchTimeout 3601 2>/dev/null; [ $? -ne 0 ]; }
+}
+test_config_fetch_timeout_repo_override() {
+  gs init >/dev/null && make_repos && gs config --global sync.fetchTimeout 2m &&
+  cd "$WORK" &&
+  assert_contains "$(gs config)" "sync.fetchTimeout = 2m (global)" &&
+  gs config sync.fetchTimeout 20m &&
+  assert_eq "$(git config git-sync.fetchTimeout)" 20m &&
+  assert_eq "$(gs config sync.fetchTimeout)" 20m &&
+  assert_contains "$(gs config)" "sync.fetchTimeout = 20m (repo)" &&
+  { gs config sync.fetchTimeout 2h 2>/dev/null; [ $? -ne 0 ]; } &&
+  assert_eq "$(gs config --global sync.fetchTimeout)" 2m
 }
 test_config_repo_override_and_unset() {
   gs init >/dev/null && make_repos && cd "$WORK" &&
@@ -995,6 +1032,8 @@ test_hints_config() {
   assert_eq "$(hints config --global sync.disableOfflineCheck | cut -f1 | tr '\n' ' ')" "true false " &&
   assert_eq "$(hints config notify.events | cut -f1 | tr '\n' ' ')" "blocked finished " &&
   assert_eq "$(hints config sync.period)" "$(printf '@msg\tnumber with optional s/m/h, at least 60s (e.g. 20m)')" &&
+  assert_contains "$out" "$(printf 'sync.fetchTimeout\t')" &&
+  assert_eq "$(hints config --global sync.fetchTimeout)" "$(printf '@msg\tnumber with optional s/m/h, 30s to 1h (e.g. 5m)')" &&
   assert_eq "$(hints config --unset sync.mode)" "" &&
   assert_eq "$(hints config sync.mode fast-forward)" "" &&
   assert_eq "$(hints config bogus.key)" ""
@@ -1068,6 +1107,8 @@ test_zsh_complete_frontend() {
   assert_contains "$out" "files -/" &&
   assert_eq "$(zsh_complete git-sync install -r "")" "files -/" &&
   assert_eq "$(zsh_complete git-sync config sync.period "")" "message number with optional s/m/h, at least 60s (e.g. 20m)" &&
+  assert_contains "$(zsh_complete git-sync config "")" "sync.fetchTimeout:" &&
+  assert_eq "$(zsh_complete git-sync config sync.fetchTimeout "")" "message number with optional s/m/h, 30s to 1h (e.g. 5m)" &&
   assert_eq "$(zsh_complete git-sync list "")" ""
 }
 test_zsh_tab_inserts() {

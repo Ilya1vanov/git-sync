@@ -20,6 +20,7 @@ __git_sync_keys() {
   __git_sync_hint sync.mode "What a sync does"
   __git_sync_hint sync.branches "Branches to fast-forward"
   __git_sync_hint sync.ffCheckedOut "Fast-forward checked-out branches too"
+  __git_sync_hint sync.fetchTimeout "Longest one fetch from one remote may run"
   __git_sync_hint sync.jobs "Repos synced in parallel (global)"
   __git_sync_hint sync.jitter "Random delay before each repo (global)"
   __git_sync_hint sync.disableOfflineCheck "Sync even without a default route (global)"
@@ -42,6 +43,7 @@ __git_sync_values() {
       __git_sync_hint blocked "A repo gained a new blocker"
       __git_sync_hint finished "Run summary counts" ;;
     sync.period) __git_sync_hint @msg "number with optional s/m/h, at least 60s (e.g. 20m)" ;;
+    sync.fetchTimeout) __git_sync_hint @msg "number with optional s/m/h, 30s to 1h (e.g. 5m)" ;;
     sync.branches) __git_sync_hint @msg "space-separated branch names" ;;
     sync.jobs) __git_sync_hint @msg "repos synced in parallel, 1-64" ;;
     sync.jitter) __git_sync_hint @msg "max random delay in seconds, 0-60" ;;

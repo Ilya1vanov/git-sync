@@ -36,7 +36,7 @@ require_init() {
 # ---- config ----
 cfg_known() {
   case "$1" in
-    sync.period|sync.repo|sync.mode|sync.branches|sync.ffCheckedOut|sync.jobs|sync.jitter|sync.disableOfflineCheck|log.maxSize|notify.enabled|notify.events) return 0 ;;
+    sync.period|sync.repo|sync.mode|sync.branches|sync.ffCheckedOut|sync.fetchTimeout|sync.jobs|sync.jitter|sync.disableOfflineCheck|log.maxSize|notify.enabled|notify.events) return 0 ;;
   esac
   return 1
 }
@@ -47,6 +47,7 @@ cfg_default() {
     sync.mode) echo fast-forward ;;
     sync.branches) echo "" ;;
     sync.ffCheckedOut) echo false ;;
+    sync.fetchTimeout) echo 5m ;;
     sync.jobs) echo 8 ;;
     sync.jitter) echo 5s ;;
     sync.disableOfflineCheck) echo false ;;
@@ -62,6 +63,7 @@ cfg_repo_name() {
     sync.mode) echo git-sync.mode ;;
     sync.branches) echo git-sync.branches ;;
     sync.ffCheckedOut) echo git-sync.ffCheckedOut ;;
+    sync.fetchTimeout) echo git-sync.fetchTimeout ;;
     *) return 1 ;;
   esac
 }
@@ -130,6 +132,15 @@ validate_value() {
       fi
       if [ "$(parse_period "$v")" -lt 60 ]; then
         echo "git-sync: sync.period must be >= 60s" >&2; return 1
+      fi ;;
+    sync.fetchTimeout)
+      if ! printf '%s' "$v" | grep -Eq '^[1-9][0-9]*[smh]?$'; then
+        echo "git-sync: sync.fetchTimeout must look like 5m, 90, 1h or 45s" >&2; return 1
+      fi
+      w=$(parse_period "$v")
+      # GIT_SYNC_FETCH_TIMEOUT_MIN: test hook lowering the minimum
+      if [ "$w" -lt "${GIT_SYNC_FETCH_TIMEOUT_MIN:-30}" ] || [ "$w" -gt 3600 ]; then
+        echo "git-sync: sync.fetchTimeout must be from ${GIT_SYNC_FETCH_TIMEOUT_MIN:-30}s to 3600s" >&2; return 1
       fi ;;
     sync.mode)
       case "$v" in
@@ -1002,7 +1013,7 @@ cmd_config() {
 
   if [ "$nargs" -eq 0 ]; then
     [ "$unset" -eq 0 ] || usage_die "--unset requires a key"
-    for k in sync.period sync.mode sync.branches sync.ffCheckedOut sync.jobs sync.jitter sync.disableOfflineCheck log.maxSize notify.enabled notify.events; do
+    for k in sync.period sync.mode sync.branches sync.ffCheckedOut sync.fetchTimeout sync.jobs sync.jitter sync.disableOfflineCheck log.maxSize notify.enabled notify.events; do
       v=$(cfg_get "$k" "$repo")
       src=$(cfg_source "$k" "$repo")
       if [ "$src" = default ] && [ "$k" = sync.branches ]; then
