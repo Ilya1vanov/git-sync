@@ -83,6 +83,7 @@ Resolution order: per-repo value, then global value, then default. Inspect with
 | `sync.ffCheckedOut` | yes | `false` | `true`, `false` |
 | `sync.jobs` | no | `8` | repos synced in parallel by `sync --all`, 1–64 |
 | `sync.jitter` | no | `5s` | random 0–N s delay before each repo in `sync --all`, 0–60 |
+| `sync.disableOfflineCheck` | no | `false` | `true`, `false` (`true`: never skip a run as offline) |
 | `log.maxSize` | no | `3M` | number with optional `K`/`M`/`G`, bytes if no unit |
 | `notify.enabled` | no | `false` | `true`, `false` |
 | `notify.events` | no | `blocked` | non-empty subset of `finished blocked` |
@@ -130,7 +131,9 @@ git-sync help
   0 and sends no notification (neither `blocked` nor `finished`); a manual run
   prints `offline` and exits 1. Having a default route does not mean the
   remotes are reachable (captive portals, networks without internet), so such
-  runs still produce `fetch-failed` blockers.
+  runs still produce `fetch-failed` blockers. If your remotes are reachable
+  without a default route (LAN or file remotes), set
+  `sync.disableOfflineCheck=true`: no run makes the check.
 
 ## Results and blockers
 

@@ -232,6 +232,19 @@ test_config_list_shows_sources() {
   assert_contains "$out" "sync.mode = fast-forward (global)" &&
   assert_not_contains "$out" "sync.repo"
 }
+test_config_disable_offline_check() {
+  gs init >/dev/null && make_repos &&
+  assert_eq "$(gs config sync.disableOfflineCheck)" false &&
+  assert_contains "$(gs config)" "sync.disableOfflineCheck = false (default)" &&
+  { gs config --global sync.disableOfflineCheck maybe 2>"$T/err"; [ $? -ne 0 ]; } &&
+  assert_contains "$(cat "$T/err")" "sync.disableOfflineCheck must be true or false" &&
+  gs config --global sync.disableOfflineCheck true &&
+  assert_contains "$(gs config)" "sync.disableOfflineCheck = true (global)" &&
+  gs config --global sync.disableOfflineCheck false &&
+  assert_eq "$(gs config sync.disableOfflineCheck)" false &&
+  { (cd "$WORK" && gs config sync.disableOfflineCheck true 2>"$T/err"); assert_eq $? 2; } &&
+  assert_contains "$(cat "$T/err")" "global-only"
+}
 
 test_install_current_repo() {
   gs init >/dev/null && make_repos && cd "$WORK" &&
@@ -411,6 +424,18 @@ test_offline_lock_held_reports_in_progress() {
   "$T/bin/git-sync-holder" & pid=$! ; mkdir "$GIT_SYNC_HOME/lock" && echo $pid > "$GIT_SYNC_HOME/lock/pid" &&
   out=$(gs sync --all) ; rc=$? ; kill $pid ;
   assert_eq $rc 0 && assert_eq "$out" "another run in progress" && assert_no_file "$T/route.calls"
+}
+test_offline_check_disabled() {
+  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null &&
+  git -C "$WORK" remote add dead "$T/nope.git" && touch "$T/offline" || return 1
+  git -C "$WORK" config git-sync.disableOfflineCheck true &&
+  out=$(cd "$WORK" && gs sync 2>&1); rc=$?
+  assert_eq $rc 1 && assert_eq "$out" offline || return 1
+  rm -f "$T/route.calls" && gs config --global sync.disableOfflineCheck true || return 1
+  gs sync --all --job >/dev/null 2>&1
+  assert_no_file "$T/route.calls" &&
+  assert_eq "$(sget "$WORK" result)" blocked &&
+  assert_contains "$(sget "$WORK" blocker)" "fetch-failed:dead"
 }
 test_lock_reused_pid_reclaimed() {
   gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null || return 1
@@ -893,6 +918,8 @@ test_hints_config() {
   assert_eq "$(hints config --global sync.mode | cut -f1 | tr '\n' ' ')" "maintain-only maintain-and-fetch fast-forward " &&
   assert_eq "$(hints config notify.enabled | cut -f1 | tr '\n' ' ')" "true false " &&
   assert_eq "$(hints config sync.ffCheckedOut | cut -f1 | tr '\n' ' ')" "true false " &&
+  assert_contains "$out" "$(printf 'sync.disableOfflineCheck\t')" &&
+  assert_eq "$(hints config --global sync.disableOfflineCheck | cut -f1 | tr '\n' ' ')" "true false " &&
   assert_eq "$(hints config notify.events | cut -f1 | tr '\n' ' ')" "blocked finished " &&
   assert_eq "$(hints config sync.period)" "$(printf '@msg\tnumber with optional s/m/h, at least 60s (e.g. 20m)')" &&
   assert_eq "$(hints config --unset sync.mode)" "" &&
@@ -912,7 +939,7 @@ test_hints_notifications() {
 test_hints_zsh_parity() {
   command -v zsh >/dev/null || { echo "    (skipped: no zsh)" >&2; return 0; }
   gs init >/dev/null && make_repos "sp ace" && gs install "$WORK" >/dev/null &&
-  for args in "" "install" "install -r" "sync" "uninstall" "status -v" "config" "config --global sync.mode" "config sync.period" "notifications"; do
+  for args in "" "install" "install -r" "sync" "uninstall" "status -v" "config" "config --global sync.mode" "config sync.period" "config --global sync.disableOfflineCheck" "notifications"; do
     assert_eq "$(hints_in zsh $args)" "$(hints_in bash $args)" "args: $args" || return 1
   done
 }
