@@ -195,12 +195,22 @@ pending  never          ~/projects/new
 
 `pending` means the repo is registered but has not been synced yet.
 
+During an offline streak (consecutive offline skips), the header shows one more
+line after `Notifications:`:
+
+```
+Offline:       skipped since <first skip> (last <latest skip>)
+```
+
+The line disappears after the next run that actually syncs.
+
 Files under `~/.git-sync` (override with `GIT_SYNC_HOME`):
 
 | Path | Content |
 |---|---|
 | `config` | Global config (git-config format) |
 | `status/<id>` | Last result per repo (rewritten each run) |
+| `state` | Offline streak (`offline.since`, `offline.lastSkip`; git-config format), cleared by the next syncing run |
 | `git-sync.log`, `git-sync.log.1` | Rotating log; rotates when over `log.maxSize` |
 | `launchd.log` | Agent stdout/stderr, truncated on each `start` |
 
