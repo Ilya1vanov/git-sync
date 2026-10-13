@@ -34,3 +34,17 @@ Sections are marked `# ---- name ----`; commands are `cmd_<name>` functions, dis
 ## Tests (`tests/run.sh`)
 
 Each `test_*` function runs in a subshell after `sandbox`, which creates a temp `HOME`, sets `GIT_SYNC_HOME`, `GIT_SYNC_AGENTS_DIR`, `GIT_CONFIG_GLOBAL`, and stubs `launchctl` (`GIT_SYNC_LAUNCHCTL`) and the notifier (`GIT_SYNC_NOTIFY_CMD`); stub calls are logged to `$STUB_DIR/*.calls`. Helpers: `make_repos [dir]` (bare `remote.git`, clone `$WORK`, second clone `pusher`), `push_commit <branch>`, `gs` (runs the script and sets `sync.jitter=0` after `init`), `assert_eq`/`assert_contains`/…, `hints_in`/`tab_complete` for completion. New tests are discovered automatically by the `test_*()` name pattern. Use repo paths with spaces/colons where relevant (existing tests do).
+
+## Agent skills
+
+### Issue tracker
+
+Issues live in GitHub Issues on Ilya1vanov/git-sync, via the `gh` CLI. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Default five labels: `needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context: root `GLOSSARY.md` + `docs/adr/`. See `docs/agents/domain.md`.
