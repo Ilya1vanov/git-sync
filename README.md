@@ -83,6 +83,7 @@ Resolution order: per-repo value, then global value, then default. Inspect with
 | `sync.ffCheckedOut` | yes | `false` | `true`, `false` |
 | `sync.jobs` | no | `8` | repos synced in parallel by `sync --all`, 1–64 |
 | `sync.jitter` | no | `5s` | random 0–N s delay before each repo in `sync --all`, 0–60 |
+| `sync.disableOfflineCheck` | no | `false` | `true`, `false` (`true`: never skip a run as offline) |
 | `log.maxSize` | no | `3M` | number with optional `K`/`M`/`G`, bytes if no unit |
 | `notify.enabled` | no | `false` | `true`, `false` |
 | `notify.events` | no | `blocked` | non-empty subset of `finished blocked` |
@@ -122,6 +123,21 @@ git-sync help
 - A linked worktree is registered as its main worktree (with a warning).
 - Only one sync runs at a time (lock in `~/.git-sync/lock`); a concurrent run
   logs that and exits 0.
+- Offline check: after taking the lock and before touching any repo, every run
+  checks for a default network route (`route -n get default`, which reads the
+  local routing table and makes no network or DNS calls). Without one, the run
+  is an offline skip: no repo is fetched or changed, no status file is
+  rewritten, and `offline, run skipped` is logged at INFO. A job run then exits
+  0 and sends no notification (neither `blocked` nor `finished`); a manual run
+  prints `offline` and exits 1. Having a default route does not mean the
+  remotes are reachable (captive portals, networks without internet), so such
+  runs still produce `fetch-failed` blockers. If your remotes are reachable
+  without a default route (LAN or file remotes), set
+  `sync.disableOfflineCheck=true`: no run makes the check.
+- Runs that only maintain need no network: when every target repo's effective
+  `sync.mode` is `maintain-only`, the offline check is not made and the run
+  syncs normally, even offline. A run with any fetching repo, or with a missing
+  or invalid repo, still makes the check, and an offline skip covers the whole run.
 
 ## Results and blockers
 
@@ -186,12 +202,22 @@ pending  never          ~/projects/new
 
 `pending` means the repo is registered but has not been synced yet.
 
+During an offline streak (consecutive offline skips), the header shows one more
+line after `Notifications:`:
+
+```
+Offline:       skipped since <first skip> (last <latest skip>)
+```
+
+The line disappears after the next run that actually syncs.
+
 Files under `~/.git-sync` (override with `GIT_SYNC_HOME`):
 
 | Path | Content |
 |---|---|
 | `config` | Global config (git-config format) |
 | `status/<id>` | Last result per repo (rewritten each run) |
+| `state` | Offline streak (`offline.since`, `offline.lastSkip`; git-config format), cleared by the next syncing run |
 | `git-sync.log`, `git-sync.log.1` | Rotating log; rotates when over `log.maxSize` |
 | `launchd.log` | Agent stdout/stderr, truncated on each `start` |
 
@@ -238,5 +264,5 @@ sh tests/run.sh                 # all tests
 sh tests/run.sh test_name ...   # selected tests
 ```
 
-Tests run in temporary sandboxes with stubbed `launchctl` and notifier, so they
+Tests run in temporary sandboxes with stubbed `launchctl`, `route` and notifier, so they
 never touch your real `~/.git-sync` or LaunchAgents. Completion tests need zsh for the zsh cases and skip them without it.

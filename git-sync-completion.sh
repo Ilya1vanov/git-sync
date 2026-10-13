@@ -22,6 +22,7 @@ __git_sync_keys() {
   __git_sync_hint sync.ffCheckedOut "Fast-forward checked-out branches too"
   __git_sync_hint sync.jobs "Repos synced in parallel (global)"
   __git_sync_hint sync.jitter "Random delay before each repo (global)"
+  __git_sync_hint sync.disableOfflineCheck "Sync even without a default route (global)"
   __git_sync_hint log.maxSize "Log rotation size (global)"
   __git_sync_hint notify.enabled "Send notifications (global)"
   __git_sync_hint notify.events "Events that notify (global)"
@@ -34,7 +35,7 @@ __git_sync_values() {
       __git_sync_hint maintain-only "Only housekeeping"
       __git_sync_hint maintain-and-fetch "Fetch all remotes, then housekeeping"
       __git_sync_hint fast-forward "Fetch, fast-forward selected branches, housekeeping" ;;
-    sync.ffCheckedOut|notify.enabled)
+    sync.ffCheckedOut|sync.disableOfflineCheck|notify.enabled)
       __git_sync_hint true "Enable"
       __git_sync_hint false "Disable" ;;
     notify.events)
