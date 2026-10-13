@@ -91,6 +91,17 @@ bash_complete() {
     _git_sync
     if [ ${#COMPREPLY[@]} -gt 0 ]; then printf "%s\n" "${COMPREPLY[@]}"; fi' _ "$COMP" "$@"
 }
+# zsh_complete WORD...: runs _git_sync_zsh with words=WORDs (last one is being
+# completed) and stubbed _describe/_files/_message that print what they receive.
+zsh_complete() {
+  zsh -f -c '
+    . "$1" 2>/dev/null; shift
+    _describe() { local c; for c in "${(@P)4}"; do print -r -- "describe $c"; done; }
+    _files() { print -r -- "files $*"; }
+    _message() { print -r -- "message $*"; }
+    words=("$@"); CURRENT=$#
+    _git_sync_zsh' _ "$COMP" "$@"
+}
 
 # --- tests ---
 test_help() {
@@ -865,6 +876,25 @@ test_bash_complete_prefix_words() {
   assert_eq "$(echo "$out" | wc -l | tr -d ' ')" 2 &&
   assert_contains "$out" "$T/app   -- registered repo" &&
   assert_contains "$out" "$T/app2  -- registered repo"
+}
+test_zsh_completion_registers() {
+  command -v zsh >/dev/null || { echo "    (skipped: no zsh)" >&2; return 0; }
+  out=$(zsh -f -c 'autoload -Uz compinit && compinit -u -D && . "$1" && print -r -- "$_comps[git-sync]"' _ "$COMP" 2>"$T/err") &&
+  assert_eq "$out" "_git_sync_zsh" && assert_eq "$(cat "$T/err")" "" &&
+  { zsh -f -c '. "$1"' _ "$COMP" 2>"$T/err"; true; } &&
+  assert_eq "$(cat "$T/err")" "git-sync: completion needs compinit; source it after compinit"
+}
+test_zsh_complete_frontend() {
+  command -v zsh >/dev/null || { echo "    (skipped: no zsh)" >&2; return 0; }
+  gs init >/dev/null && make_repos "a:b c" && gs install "$WORK" >/dev/null &&
+  assert_contains "$(zsh_complete git-sync st)" "describe status:Show agent state and per-repo sync status" &&
+  assert_eq "$(zsh_complete git-sync uninstall "")" "describe $T/a\\:b c:registered repo" &&
+  out=$(zsh_complete git-sync install "") &&
+  assert_contains "$out" "describe -r:Add every repo directly inside <dir>" &&
+  assert_contains "$out" "files -/" &&
+  assert_eq "$(zsh_complete git-sync install -r "")" "files -/" &&
+  assert_eq "$(zsh_complete git-sync config sync.period "")" "message number with optional s/m/h, at least 60s (e.g. 20m)" &&
+  assert_eq "$(zsh_complete git-sync list "")" ""
 }
 
 # --- runner ---

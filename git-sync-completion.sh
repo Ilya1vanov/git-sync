@@ -115,7 +115,27 @@ __git_sync_hints() {
 
 # ---- shell frontends ----
 if [ -n "${ZSH_VERSION-}" ]; then
-  :
+  _git_sync_zsh() {
+    emulate -L zsh
+    local line msg= dirs=0 ret=1
+    local -a cands
+    for line in "${(@f)$(__git_sync_hints "${(@)words[2,CURRENT-1]}")}"; do
+      case $line in
+        @dirs) dirs=1 ;;
+        @msg*) msg=${line#*$'\t'} ;;
+        ?*) cands+=("${${line%%$'\t'*}//:/\\:}:${line#*$'\t'}") ;;
+      esac
+    done
+    (( ${#cands} )) && _describe -t hints 'git-sync' cands && ret=0
+    (( dirs )) && _files -/ && ret=0
+    [[ -n $msg ]] && _message "$msg" && ret=0
+    return ret
+  }
+  if (( $+functions[compdef] )); then
+    compdef _git_sync_zsh git-sync
+  else
+    echo "git-sync: completion needs compinit; source it after compinit" >&2
+  fi
 elif [ -n "${BASH_VERSION-}" ]; then
   # Several matches are listed as "word  -- description"; a single match is
   # inserted bare. Empty COMPREPLY falls back to filenames (-o default).
