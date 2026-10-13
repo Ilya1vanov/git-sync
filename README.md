@@ -40,7 +40,8 @@ Completes commands, flags, config keys and values, and registered repos for
 descriptions in its menu and a hint for free-form values such as
 `sync.period`. bash shows them when you press Tab twice with several
 matches. In bash, contexts with no candidates fall back to filename
-completion. zsh shows the free-form value hints only when a messages format
+completion. If bash Tab is bound to `menu-complete`, cycling inserts the
+description text into the line; bash 3.2 cannot tell listing from cycling. zsh shows the free-form value hints only when a messages format
 is set, e.g. `zstyle ':completion:*:messages' format '%d'` (most zsh
 frameworks set one).
 

@@ -80,7 +80,7 @@ hints_in() {
   $sh -c '. "$1"; shift; __git_sync_hints "$@"' _ "$COMP" "$@"
 }
 hints() { hints_in bash "$@"; }
-# bash_complete WORD...: runs _git_sync with COMP_WORDS=WORDs (last one is being
+# bash_complete WORD...: runs __git_sync_bash with COMP_WORDS=WORDs (last one is being
 # completed); prints COMPREPLY one per line. Prefers /bin/bash (3.2 on macOS).
 bash_complete() {
   local b=bash
@@ -88,7 +88,7 @@ bash_complete() {
   "$b" --norc --noprofile -c '
     . "$1"; shift
     COMP_WORDS=("$@"); COMP_CWORD=$(($# - 1)); COMPREPLY=()
-    _git_sync
+    __git_sync_bash
     if [ ${#COMPREPLY[@]} -gt 0 ]; then printf "%s\n" "${COMPREPLY[@]}"; fi' _ "$COMP" "$@"
 }
 # zsh_complete WORD...: runs _git_sync_zsh with words=WORDs (last one is being
@@ -101,6 +101,34 @@ zsh_complete() {
     _message() { print -r -- "message $*"; }
     words=("$@"); CURRENT=$#
     _git_sync_zsh' _ "$COMP" "$@"
+}
+# tab_complete SHELL LINE: types LINE<TAB><Enter> in an interactive SHELL (bash|zsh)
+# with the completion loaded and git-sync stubbed to print its args one per line.
+# Real readline/zle, so it sees what is actually inserted. Needs expect.
+tab_complete() {
+  local start init
+  case $1 in
+    bash) start="/bin/bash --norc --noprofile -i"; init=". '$COMP'" ;;
+    zsh) start="zsh -f -i"; init="autoload -Uz compinit; compinit -u -D; . '$COMP'" ;;
+  esac
+  cat > "$T/tab.exp" <<'EOF'
+set timeout 5
+log_user 0
+lassign $argv start init out line
+spawn -noecho {*}$start
+send "PS1='P''ROMPT>'\r"
+expect "PROMPT>"
+send "$init; git-sync() { printf '%s\\n' \"\$@\" > '$out'; }\r"
+expect "PROMPT>"
+send "$line\t"
+sleep 1
+send "\r"
+expect "PROMPT>"
+send "exit\r"
+expect eof
+EOF
+  rm -f "$T/tab.out"
+  expect -f "$T/tab.exp" "$start" "$init" "$T/tab.out" "$2" && cat "$T/tab.out"
 }
 
 # --- tests ---
@@ -844,7 +872,7 @@ test_hints_zsh_parity() {
 }
 test_bash_completion_registers() {
   out=$(bash --norc --noprofile -c '. "$1" && complete -p git-sync' _ "$COMP" 2>&1) &&
-  assert_contains "$out" "-o default" && assert_contains "$out" "-F _git_sync"
+  assert_contains "$out" "-o default" && assert_contains "$out" "-F __git_sync_bash"
 }
 test_bash_complete_words() {
   out=$(bash_complete git-sync st) &&
@@ -864,7 +892,7 @@ test_bash_complete_install_dirs() {
 test_bash_complete_paths() {
   gs init >/dev/null && make_repos "a:b c" && gs install "$WORK" >/dev/null &&
   assert_eq "$(bash_complete git-sync uninstall "$T/a")" "$T/a:b\\ c" &&
-  assert_eq "$(bash_complete git-sync uninstall "$T/a:b\\ ")" "$T/a:b\\ c" &&
+  assert_eq "$(bash_complete git-sync uninstall "$T/a:b\\ ")" "b\\ c" &&
   out=$(bash_complete git-sync sync "") &&
   assert_contains "$out" "--all" && assert_contains "$out" "$T/a:b\\ c" && assert_contains "$out" "-- registered repo"
 }
@@ -895,6 +923,23 @@ test_zsh_complete_frontend() {
   assert_eq "$(zsh_complete git-sync install -r "")" "files -/" &&
   assert_eq "$(zsh_complete git-sync config sync.period "")" "message number with optional s/m/h, at least 60s (e.g. 20m)" &&
   assert_eq "$(zsh_complete git-sync list "")" ""
+}
+test_zsh_tab_inserts() {
+  command -v zsh >/dev/null && command -v expect >/dev/null || { echo "    (skipped: no zsh or expect)" >&2; return 0; }
+  gs init >/dev/null && make_repos "a:b c" && gs install "$WORK" >/dev/null &&
+  assert_eq "$(tab_complete zsh "git-sync unin")" "uninstall" &&
+  assert_eq "$(tab_complete zsh "git-sync config sync.mode fa" | tr '\n' ' ')" "config sync.mode fast-forward " &&
+  assert_eq "$(tab_complete zsh "git-sync uninstall $T/a" | tail -1)" "$T/a:b c"
+}
+test_bash_tab_inserts() {
+  command -v expect >/dev/null || { echo "    (skipped: no expect)" >&2; return 0; }
+  gs init >/dev/null && make_repos "a:b c" && gs install "$WORK" >/dev/null &&
+  assert_eq "$(tab_complete bash "git-sync unin")" "uninstall" &&
+  assert_eq "$(tab_complete bash "git-sync uninstall $T/a" | tail -1)" "$T/a:b c" &&
+  assert_eq "$(tab_complete bash "git-sync uninstall $T/a:" | tail -1)" "$T/a:b c"
+}
+test_bash_no_git_subcommand_clash() {
+  ! bash --norc --noprofile -c '. "$1" && declare -F _git_sync' _ "$COMP" >/dev/null
 }
 test_install_sh_completion() {
   f="$T/share/git-sync/git-sync-completion.sh" &&

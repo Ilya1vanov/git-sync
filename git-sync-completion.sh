@@ -116,7 +116,8 @@ __git_sync_hints() {
 # ---- shell frontends ----
 if [ -n "${ZSH_VERSION-}" ]; then
   _git_sync_zsh() {
-    emulate -L zsh
+    # extendedglob: _describe needs it to split "word:desc" (compsys sets it).
+    emulate -L zsh -o extendedglob
     local line msg= dirs=0 ret=1
     local -a cands
     for line in "${(@f)$(__git_sync_hints "${(@)words[2,CURRENT-1]}")}"; do
@@ -139,9 +140,13 @@ if [ -n "${ZSH_VERSION-}" ]; then
 elif [ -n "${BASH_VERSION-}" ]; then
   # Several matches are listed as "word  -- description"; a single match is
   # inserted bare. Empty COMPREPLY falls back to filenames (-o default).
-  _git_sync() {
-    local cur=${COMP_WORDS[COMP_CWORD]} line word max=0 dirs=0 i
+  # Not named _git_sync: git's own completion calls _git_<sub> for "git sync".
+  __git_sync_bash() {
+    local cur=${COMP_WORDS[COMP_CWORD]} line word max=0 dirs=0 i pre=
     local -a words=() descs=()
+    # Readline replaces only the text after the last ":" (COMP_WORDBREAKS),
+    # so replies must drop the part of cur up to it.
+    if [[ $cur == *:* && $COMP_WORDBREAKS == *:* ]]; then pre=${cur%"${cur##*:}"}; fi
     while IFS= read -r line; do
       case $line in
         @dirs) dirs=1 ;;
@@ -149,6 +154,7 @@ elif [ -n "${BASH_VERSION-}" ]; then
         *)
           printf -v word '%q' "${line%%$'\t'*}"
           [[ $word == "$cur"* ]] || continue
+          word=${word#"$pre"}
           words+=("$word"); descs+=("${line#*$'\t'}")
           if (( ${#word} > max )); then max=${#word}; fi ;;
       esac
@@ -160,5 +166,5 @@ elif [ -n "${BASH_VERSION-}" ]; then
       COMPREPLY+=("$(printf '%-*s  -- %s' "$max" "${words[i]}" "${descs[i]}")")
     done
   }
-  complete -o default -F _git_sync git-sync
+  complete -o default -F __git_sync_bash git-sync
 fi
