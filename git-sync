@@ -36,7 +36,7 @@ require_init() {
 # ---- config ----
 cfg_known() {
   case "$1" in
-    sync.period|sync.repo|sync.mode|sync.branches|sync.ffCheckedOut|sync.jobs|sync.jitter|log.maxSize|notify.enabled|notify.events) return 0 ;;
+    sync.period|sync.repo|sync.mode|sync.branches|sync.ffCheckedOut|sync.jobs|sync.jitter|sync.disableOfflineCheck|log.maxSize|notify.enabled|notify.events) return 0 ;;
   esac
   return 1
 }
@@ -49,6 +49,7 @@ cfg_default() {
     sync.ffCheckedOut) echo false ;;
     sync.jobs) echo 8 ;;
     sync.jitter) echo 5s ;;
+    sync.disableOfflineCheck) echo false ;;
     log.maxSize) echo 3M ;;
     notify.enabled) echo false ;;
     notify.events) echo blocked ;;
@@ -146,7 +147,7 @@ validate_value() {
         fi
       done
       set +f ;;
-    sync.ffCheckedOut|notify.enabled)
+    sync.ffCheckedOut|sync.disableOfflineCheck|notify.enabled)
       case "$v" in
         true|false) ;;
         *) echo "git-sync: $key must be true or false" >&2; return 1 ;;
@@ -908,7 +909,7 @@ cmd_sync() {
     echo "another run in progress"
     return 0
   fi
-  if needs_offline_check "$entries" && ! is_online; then
+  if [ "$(cfg_get sync.disableOfflineCheck)" != true ] && needs_offline_check "$entries" && ! is_online; then
     log_msg INFO "offline, run skipped"
     streak_record
     [ "$GS_JOB" = 1 ] && return 0
@@ -985,7 +986,7 @@ cmd_config() {
 
   if [ "$nargs" -eq 0 ]; then
     [ "$unset" -eq 0 ] || usage_die "--unset requires a key"
-    for k in sync.period sync.mode sync.branches sync.ffCheckedOut sync.jobs sync.jitter log.maxSize notify.enabled notify.events; do
+    for k in sync.period sync.mode sync.branches sync.ffCheckedOut sync.jobs sync.jitter sync.disableOfflineCheck log.maxSize notify.enabled notify.events; do
       v=$(cfg_get "$k" "$repo")
       src=$(cfg_source "$k" "$repo")
       if [ "$src" = default ] && [ "$k" = sync.branches ]; then
