@@ -82,6 +82,7 @@ Resolution order: per-repo value, then global value, then default. Inspect with
 | `sync.mode` | yes | `fast-forward` | `maintain-only`, `maintain-and-fetch`, `fast-forward` |
 | `sync.branches` | yes | unset | space-separated branch names |
 | `sync.ffCheckedOut` | yes | `false` | `true`, `false` |
+| `sync.fetchTimeout` | yes | `5m` | number with optional `s`/`m`/`h`, 30 s to 1 h; longest one fetch from one remote may run |
 | `sync.jobs` | no | `8` | repos synced in parallel by `sync --all`, 1–64 |
 | `sync.jitter` | no | `5s` | random 0–N s delay before each repo in `sync --all`, 0–60 |
 | `sync.disableOfflineCheck` | no | `false` | `true`, `false` (`true`: never skip a run as offline) |
@@ -194,6 +195,7 @@ Result per repo: `ok`, `blocked` (at least one blocker), `error`, `missing`
 | `<branch>:diverged` | Local branch is both ahead of and behind its upstream, so it cannot fast-forward. (Ahead only is a note, not a blocker.) |
 | `<branch>:ff-failed` | Git refused the fast-forward (for example mid-rebase, an untracked file in the way, `index.lock`). |
 | `fetch-failed:<remote>` | `git fetch` failed for that remote. Branches tracking it are skipped. |
+| `fetch-timeout:<remote>` | A fetch from that remote ran longer than `sync.fetchTimeout` and was stopped. Branches tracking it are skipped. |
 | `maintenance:failed` | `git maintenance run` failed. |
 | `repo:invalid` | The path exists but is not a git repository (result `error`). |
 

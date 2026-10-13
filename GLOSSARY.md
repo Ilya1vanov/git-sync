@@ -28,6 +28,10 @@ A run started by the user from a shell.
 A condition in a repo that stops git-sync from bringing it up to date and needs the user's judgment.
 _Avoid_: error, failure
 
+**Fetch timeout**:
+The longest one fetch from one remote may run before git-sync cuts it off. A cut-off fetch is a blocker for that remote, distinct from a fetch the remote rejected.
+_Avoid_: watchdog (the mechanism, not the concept), hang
+
 **Offline check**:
 The test, made before a run touches any repo, of whether the machine has a default network route.
 _Avoid_: connectivity probe, reachability check

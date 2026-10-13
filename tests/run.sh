@@ -51,6 +51,8 @@ EOF
   chmod +x "$T/bin/launchctl" "$T/bin/notify" "$T/bin/route"
   export STUB_DIR="$T" GIT_SYNC_LAUNCHCTL="$T/bin/launchctl" GIT_SYNC_NOTIFY_CMD="$T/bin/notify"
   export GIT_SYNC_ROUTE="$T/bin/route"
+  # lowers the 30s minimum of sync.fetchTimeout so tests can use short timeouts
+  export GIT_SYNC_FETCH_TIMEOUT_MIN=1
   cd "$T" || exit 1
 }
 
@@ -197,6 +199,41 @@ test_config_set_global_and_validate() {
   gs config --global notify.events "finished blocked" &&
   gs config --global log.maxSize 512K && gs config --global sync.period 90 &&
   assert_eq "$(gs config sync.period)" 90
+}
+test_config_fetch_timeout_default_and_valid_values() {
+  gs init >/dev/null &&
+  assert_eq "$(gs config sync.fetchTimeout)" 5m &&
+  assert_contains "$(gs config)" "sync.fetchTimeout = 5m (default)" &&
+  for v in 30s 5m 1h 90 3600s 60m; do
+    gs config --global sync.fetchTimeout "$v" && assert_eq "$(gs config sync.fetchTimeout)" "$v" || return 1
+  done
+}
+test_config_fetch_timeout_rejects_invalid() {
+  unset GIT_SYNC_FETCH_TIMEOUT_MIN
+  gs init >/dev/null &&
+  for v in 29s 29 3601 61m 2h abc 0 5x 1.5m ""; do
+    { gs config --global sync.fetchTimeout "$v" 2>"$T/err"; [ $? -ne 0 ]; } &&
+    assert_contains "$(cat "$T/err")" "sync.fetchTimeout must" || { echo "    accepted [$v]"; return 1; }
+  done &&
+  assert_contains "$(gs config)" "sync.fetchTimeout = 5m (default)"
+}
+test_config_fetch_timeout_min_test_hook() {
+  gs init >/dev/null &&
+  gs config --global sync.fetchTimeout 2s && assert_eq "$(gs config sync.fetchTimeout)" 2s &&
+  { GIT_SYNC_FETCH_TIMEOUT_MIN=10 gs config --global sync.fetchTimeout 9 2>"$T/err"; [ $? -ne 0 ]; } &&
+  GIT_SYNC_FETCH_TIMEOUT_MIN=10 gs config --global sync.fetchTimeout 10 &&
+  { gs config --global sync.fetchTimeout 3601 2>/dev/null; [ $? -ne 0 ]; }
+}
+test_config_fetch_timeout_repo_override() {
+  gs init >/dev/null && make_repos && gs config --global sync.fetchTimeout 2m &&
+  cd "$WORK" &&
+  assert_contains "$(gs config)" "sync.fetchTimeout = 2m (global)" &&
+  gs config sync.fetchTimeout 20m &&
+  assert_eq "$(git config git-sync.fetchTimeout)" 20m &&
+  assert_eq "$(gs config sync.fetchTimeout)" 20m &&
+  assert_contains "$(gs config)" "sync.fetchTimeout = 20m (repo)" &&
+  { gs config sync.fetchTimeout 2h 2>/dev/null; [ $? -ne 0 ]; } &&
+  assert_eq "$(gs config --global sync.fetchTimeout)" 2m
 }
 test_config_repo_override_and_unset() {
   gs init >/dev/null && make_repos && cd "$WORK" &&
@@ -553,6 +590,177 @@ test_sync_env_respects_core_sshcommand() {
   ( unset GIT_SSH_COMMAND GIT_SSH; cd "$WORK" && gs sync >/dev/null 2>&1 );
   a=$(cat "$T/ssh.args" 2>/dev/null) &&
   assert_contains "$a" "--marker" && assert_not_contains "$a" "BatchMode=yes"
+}
+# hang_stub [ignore-term]: fake ssh that never finishes. Its command line holds
+# $T/bin/ssh, a unique marker for leak checks (`marked`).
+hang_stub() {
+  { echo '#!/bin/sh'
+    [ "${1:-}" = ignore-term ] && echo "trap '' TERM"
+    echo 'while :; do sleep 1; done'; } > "$T/bin/ssh"
+  chmod +x "$T/bin/ssh"
+}
+# marked: PIDs of live processes carrying the stub marker or a sleeper of N seconds ($1).
+marked() { pgrep -f "$T/bin/ssh"; [ -z "${1:-}" ] || pgrep -fx "sleep $1"; }
+# gs_ssh ARGS...: run git-sync with the fake ssh first on PATH and no inherited ssh command.
+gs_ssh() { ( unset GIT_SSH_COMMAND GIT_SSH; PATH="$T/bin:$PATH"; gs "$@" ); }
+
+test_fetch_timeout_hung_remote() {
+  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null && hang_stub &&
+  gs config --global sync.fetchTimeout 2s && gs config --global sync.branches develop &&
+  git -C "$WORK" remote add up "$T/remote.git" &&
+  push_commit develop d2 && git -C "$WORK" fetch -q origin &&
+  old=$(git -C "$WORK" rev-parse develop) &&
+  git -C "$WORK" remote set-url origin "ssh://example.invalid/x.git" || return 1
+  start=$(date +%s)
+  out=$(cd "$WORK" && gs_ssh sync 2>&1); rc=$?
+  el=$(( $(date +%s) - start ))
+  assert_eq $rc 1 && assert_eq "$out" "$WORK: blocked (fetch-timeout:origin)" &&
+  [ "$el" -lt 8 ] || { echo "    took ${el}s"; return 1; }
+  assert_eq "$(blockers)" "fetch-timeout:origin timed out after 2s" &&
+  assert_eq "$(git -C "$WORK" rev-parse develop)" "$old" &&
+  git -C "$WORK" rev-parse -q --verify refs/remotes/up/develop >/dev/null &&
+  assert_eq "$(marked)" "" &&
+  assert_contains "$(gs status -v)" "  blocker:       fetch-timeout:origin timed out after 2s" &&
+  assert_not_contains "$(cat "$GIT_SYNC_HOME/git-sync.log")" "Terminated" || return 1
+  git -C "$WORK" remote set-url origin "$T/remote.git" &&
+  (cd "$WORK" && gs_ssh sync >/dev/null) && assert_eq "$(blockers)" "" &&
+  assert_eq "$(git -C "$WORK" rev-parse develop)" "$(git -C "$T/remote.git" rev-parse develop)"
+}
+test_fetch_timeout_normal_fetch_unchanged() {
+  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null &&
+  gs config --global sync.fetchTimeout 47 && push_commit main m2 && git -C "$WORK" checkout -q develop &&
+  out=$(cd "$WORK" && gs sync 2>&1) && assert_eq "$out" "$WORK: ok" &&
+  assert_eq "$(git -C "$WORK" rev-parse main)" "$(git -C "$T/remote.git" rev-parse main)" &&
+  assert_eq "$(marked 47)" ""
+}
+test_fetch_timeout_parallel_and_notify() {
+  gs init >/dev/null && gs notifications enable >/dev/null && gs config --global sync.jobs 2 &&
+  gs config --global sync.fetchTimeout 2 && gs config --global sync.branches develop &&
+  make_repos && gs install "$WORK" >/dev/null && ssh_stub &&
+  git clone -q "$T/remote.git" "$T/r2" && git -C "$T/r2" branch -q --track develop origin/develop &&
+  gs install "$T/r2" >/dev/null &&
+  git -C "$WORK" remote add sshr "ssh://example.invalid/x.git" &&
+  quiet gs_ssh sync --all --job && assert_contains "$(ncalls)" "fetch-failed:sshr" &&
+  rm -f "$T/notify.calls" && hang_stub && push_commit develop d2 || return 1
+  out=$(gs_ssh sync --all 2>&1); rc=$?
+  assert_eq $rc 1 && assert_contains "$out" "$WORK: blocked (fetch-timeout:sshr)" &&
+  assert_contains "$out" "$T/r2: ok" && assert_not_contains "$out" "Terminated" &&
+  assert_eq "$(git -C "$T/r2" rev-parse develop)" "$(git -C "$T/remote.git" rev-parse develop)" &&
+  assert_eq "$(git -C "$WORK" rev-parse develop)" "$(git -C "$T/remote.git" rev-parse develop)" &&
+  assert_eq "$(marked)" "" || return 1
+  # a switch from fetch-failed to fetch-timeout is newly blocked
+  ssh_stub && quiet gs_ssh sync --all --job && rm -f "$T/notify.calls" && hang_stub &&
+  quiet gs_ssh sync --all --job && assert_contains "$(ncalls)" "git-sync: work|fetch-timeout:sshr" &&
+  assert_eq "$(marked)" ""
+}
+test_fetch_timeout_kill_escalation() {
+  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null && hang_stub ignore-term &&
+  gs config --global sync.fetchTimeout 1 &&
+  git -C "$WORK" remote set-url origin "ssh://example.invalid/x.git" || return 1
+  out=$(cd "$WORK" && gs_ssh sync 2>&1)
+  assert_eq "$out" "$WORK: blocked (fetch-timeout:origin)" &&
+  assert_eq "$(blockers)" "fetch-timeout:origin timed out after 1" &&
+  assert_eq "$(marked)" ""
+}
+# poll TENTHS CONDITION: re-evaluates CONDITION every 0.1s; fails after TENTHS tries.
+poll() {
+  local n=0
+  until eval "$2"; do n=$((n + 1)); [ "$n" -lt "$1" ] || return 1; sleep 0.1; done
+}
+# fetches N: true once N hanging fetches (fake ssh processes) are in flight.
+fetches() { [ "$(marked | grep -c .)" -ge "$1" ]; }
+# leftovers: PIDs of live fake ssh, 53s sleepers, jitter sleeps (2 decimals) or workers.
+leftovers() {
+  marked 53; pgrep -fx 'sleep [0-9]+\.[0-9][0-9]'; pgrep -f "__sync-one.*$GIT_SYNC_HOME/run"
+}
+# interrupted_run READY SIG ARGS...: starts `git-sync ARGS` in the background
+# (own process group, like a terminal job; sync.fetchTimeout should be 53),
+# waits until the shell condition READY holds, then sends SIG: INT to the whole
+# group (Ctrl-C), TERM to the run alone. Checks the run ends promptly and leaves
+# no fetch, ssh, sleeper or worker behind, no lock, no temp dir, no job notice.
+interrupted_run() {
+  local ready=$1 sig=$2 pid rc; shift 2
+  set -m; gs_ssh "$@" > "$T/int.out" 2>&1 & pid=$!; set +m
+  poll 100 "$ready" || { echo "    never ready: $ready"; kill -KILL -"$pid"; return 1; }
+  if [ "$sig" = INT ]; then kill -INT -"$pid"; else kill -TERM "$(cat "$GIT_SYNC_HOME/lock/pid")"; fi
+  poll 50 '! kill -0 "$pid" 2>/dev/null' || { echo "    run still alive after $sig"; kill -KILL -"$pid"; return 1; }
+  wait "$pid" 2>/dev/null; rc=$?
+  [ "$rc" -ne 0 ] || { echo "    interrupted run exited 0"; return 1; }
+  poll 30 '[ -z "$(leftovers)" ]' || { echo "    leaked: $(leftovers | tr '\n' ' ')"; kill -KILL $(leftovers) 2>/dev/null; return 1; }
+  [ ! -d "$GIT_SYNC_HOME/lock" ] || { echo "    lock left behind"; return 1; }
+  assert_eq "$(ls "$GIT_SYNC_HOME" | grep '^fetch\.')" "" &&
+  assert_not_contains "$(cat "$T/int.out")" "Terminated" &&
+  assert_not_contains "$(cat "$T/int.out")" "Interrupt"
+}
+test_interrupt_inline_run_stops_fetch() {
+  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null && hang_stub &&
+  gs config --global sync.fetchTimeout 53 &&
+  git -C "$WORK" remote set-url origin "ssh://example.invalid/x.git" || return 1
+  for sig in TERM INT; do
+    interrupted_run 'fetches 1' "$sig" sync "$WORK" || { echo "    ($sig)"; return 1; }
+  done
+  # the lock is free: the next run proceeds
+  ssh_stub && out=$(gs_ssh sync "$WORK" 2>&1)
+  assert_eq "$out" "$WORK: blocked (fetch-failed:origin)"
+}
+test_interrupt_parallel_run_stops_fetches() {
+  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null && hang_stub &&
+  git clone -q "$T/remote.git" "$T/r2" && gs install "$T/r2" >/dev/null &&
+  gs config --global sync.fetchTimeout 53 && gs config --global sync.jobs 2 &&
+  git -C "$WORK" remote set-url origin "ssh://example.invalid/x.git" &&
+  git -C "$T/r2" remote set-url origin "ssh://example.invalid/y.git" || return 1
+  for sig in TERM INT; do
+    interrupted_run 'fetches 2' "$sig" sync --all || { echo "    ($sig)"; return 1; }
+  done
+  ssh_stub && out=$(gs_ssh sync --all 2>&1)
+  assert_contains "$out" "$WORK: blocked (fetch-failed:origin)" &&
+  assert_contains "$out" "$T/r2: blocked (fetch-failed:origin)"
+}
+test_interrupt_kills_fetch_that_ignores_term() {
+  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null && hang_stub ignore-term &&
+  git clone -q "$T/remote.git" "$T/r2" && gs install "$T/r2" >/dev/null &&
+  gs config --global sync.fetchTimeout 53 && gs config --global sync.jobs 2 &&
+  git -C "$WORK" remote set-url origin "ssh://example.invalid/x.git" &&
+  git -C "$T/r2" remote set-url origin "ssh://example.invalid/y.git" || return 1
+  for sig in TERM INT; do
+    interrupted_run 'fetches 1' "$sig" sync "$WORK" || { echo "    (inline $sig)"; return 1; }
+    interrupted_run 'fetches 2' "$sig" sync --all || { echo "    (--all $sig)"; return 1; }
+  done
+}
+test_interrupt_during_timeout_grace_kills_fetch() {
+  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null && hang_stub ignore-term &&
+  gs config --global sync.fetchTimeout 1 &&
+  git -C "$WORK" remote set-url origin "ssh://example.invalid/x.git" || return 1
+  # the timer has fired; the fetch ignores TERM and awaits its KILL
+  interrupted_run 'fetches 1 && ls "$GIT_SYNC_HOME"/fetch.*/timeout >/dev/null 2>&1' TERM sync "$WORK"
+}
+test_interrupt_during_jitter_is_prompt() {
+  # two workers, so that the run is still sleeping even if one draws a tiny delay
+  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null &&
+  git clone -q "$T/remote.git" "$T/r2" && gs install "$T/r2" >/dev/null &&
+  gs config --global sync.jobs 2 && gs config --global sync.jitter 50 &&
+  gs config --global sync.mode maintain-only || return 1
+  for sig in TERM INT; do
+    interrupted_run '[ -n "$(pgrep -fx "sleep [0-9]+\.[0-9][0-9]")" ]' "$sig" sync --all || { echo "    ($sig)"; return 1; }
+  done
+}
+test_interrupt_removes_fetch_dir_of_killed_worker() {
+  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null && hang_stub &&
+  gs config --global sync.fetchTimeout 53 &&
+  git -C "$WORK" remote set-url origin "ssh://example.invalid/x.git" || return 1
+  # fetch.1 stands for the temp dir of a worker of this run that was SIGKILLed
+  interrupted_run 'fetches 1 && mkdir -p "$GIT_SYNC_HOME/fetch.1"' TERM sync --all
+}
+test_fetch_timeout_maintenance_still_runs() {
+  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null && hang_stub &&
+  gs config --global sync.fetchTimeout 1 &&
+  # a negative auto limit makes `maintenance run --auto` always write the commit-graph
+  git -C "$WORK" config maintenance.commit-graph.auto -1 &&
+  git -C "$WORK" remote set-url origin "ssh://example.invalid/x.git" &&
+  assert_no_file "$WORK/.git/objects/info/commit-graphs/commit-graph-chain" || return 1
+  out=$(cd "$WORK" && gs_ssh sync 2>&1)
+  assert_eq "$out" "$WORK: blocked (fetch-timeout:origin)" &&
+  assert_file "$WORK/.git/objects/info/commit-graphs/commit-graph-chain"
 }
 
 ffsetup() { gs init >/dev/null && make_repos "$@" && gs install "$WORK" >/dev/null; }
@@ -1162,6 +1370,8 @@ test_hints_config() {
   assert_eq "$(hints config --global sync.disableOfflineCheck | cut -f1 | tr '\n' ' ')" "true false " &&
   assert_eq "$(hints config notify.events | cut -f1 | tr '\n' ' ')" "blocked finished " &&
   assert_eq "$(hints config sync.period)" "$(printf '@msg\tnumber with optional s/m/h, at least 60s (e.g. 20m)')" &&
+  assert_contains "$out" "$(printf 'sync.fetchTimeout\t')" &&
+  assert_eq "$(hints config --global sync.fetchTimeout)" "$(printf '@msg\tnumber with optional s/m/h, 30s to 1h (e.g. 5m)')" &&
   assert_eq "$(hints config --unset sync.mode)" "" &&
   assert_eq "$(hints config sync.mode fast-forward)" "" &&
   assert_eq "$(hints config bogus.key)" ""
@@ -1236,6 +1446,8 @@ test_zsh_complete_frontend() {
   assert_contains "$out" "files -/" &&
   assert_eq "$(zsh_complete git-sync install -r "")" "$(printf '%s\n%s' "describe --watch:Also install future clones in <dir>" "files -/")" &&
   assert_eq "$(zsh_complete git-sync config sync.period "")" "message number with optional s/m/h, at least 60s (e.g. 20m)" &&
+  assert_contains "$(zsh_complete git-sync config "")" "sync.fetchTimeout:" &&
+  assert_eq "$(zsh_complete git-sync config sync.fetchTimeout "")" "message number with optional s/m/h, 30s to 1h (e.g. 5m)" &&
   assert_eq "$(zsh_complete git-sync list "")" "describe --watch:Only the watched roots"
 }
 test_zsh_tab_inserts() {
