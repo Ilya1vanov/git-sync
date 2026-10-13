@@ -896,6 +896,24 @@ test_zsh_complete_frontend() {
   assert_eq "$(zsh_complete git-sync config sync.period "")" "message number with optional s/m/h, at least 60s (e.g. 20m)" &&
   assert_eq "$(zsh_complete git-sync list "")" ""
 }
+test_install_sh_hints() {
+  f="$T/share/git-sync/git-sync-completion.sh" &&
+  out=$(PREFIX="$T/bin2" XDG_DATA_HOME="$T/share" sh "$ROOT/install.sh" --hints) &&
+  [ -x "$T/bin2/git-sync" ] && cmp -s "$f" "$COMP" &&
+  assert_contains "$out" "Installed $f" &&
+  assert_contains "$out" "[ -f \"$f\" ] && . \"$f\"" &&
+  assert_contains "$out" "Next: run 'git-sync init'." &&
+  PREFIX="$T/bin2" XDG_DATA_HOME="$T/share" sh "$ROOT/install.sh" --hints >/dev/null &&
+  assert_eq "$(ls "$T/share/git-sync")" "git-sync-completion.sh"
+}
+test_install_sh_default_and_bad_arg() {
+  out=$(PREFIX="$T/bin2" XDG_DATA_HOME="$T/share" sh "$ROOT/install.sh") &&
+  assert_no_file "$T/share/git-sync" && assert_not_contains "$out" "hints" &&
+  { PREFIX="$T/bin3" sh "$ROOT/install.sh" --bogus 2>"$T/err"; assert_eq $? 2; } &&
+  assert_contains "$(cat "$T/err")" "install.sh: unknown argument: --bogus" &&
+  assert_contains "$(cat "$T/err")" "Usage: sh install.sh [--hints]" &&
+  assert_no_file "$T/bin3"
+}
 
 # --- runner ---
 if [ $# -gt 0 ]; then TESTS="$*"; else

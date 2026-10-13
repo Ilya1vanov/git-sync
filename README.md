@@ -13,6 +13,7 @@ dependencies.
 
 ```sh
 sh install.sh          # copies git-sync to ${PREFIX:-$HOME/.local/bin}
+sh install.sh --hints  # same, plus bash/zsh tab completion (see Shell completion)
 git-sync init          # creates ~/.git-sync with default config
 cd /path/to/repo
 git-sync install       # register the repo (repeat per repo)
@@ -22,6 +23,26 @@ git-sync start         # write the LaunchAgent and load it
 
 `~/.local/bin` must be on your `PATH`. `git-sync start` is idempotent and also
 reloads the agent. Changing the global `sync.period` reloads it automatically.
+
+## Shell completion
+
+`sh install.sh --hints` copies `git-sync-completion.sh` to
+`${XDG_DATA_HOME:-$HOME/.local/share}/git-sync/` and prints one line to add
+to your shell's rc file. It does not edit rc files.
+
+```sh
+# ~/.bashrc, or ~/.zshrc after compinit
+[ -f ~/.local/share/git-sync/git-sync-completion.sh ] && . ~/.local/share/git-sync/git-sync-completion.sh
+```
+
+Completes commands, flags, config keys and values, and registered repos for
+`uninstall` and `sync`, with a short description for each. zsh shows the
+descriptions in its menu and a hint for free-form values such as
+`sync.period`. bash shows them when you press Tab twice with several
+matches. In bash, contexts with no candidates fall back to filename
+completion. zsh shows the free-form value hints only when a messages format
+is set, e.g. `zstyle ':completion:*:messages' format '%d'` (most zsh
+frameworks set one).
 
 ## Modes
 
@@ -202,6 +223,7 @@ failures are logged and ignored.
 ```sh
 git-sync stop                  # unload agent, remove the plist
 rm ~/.local/bin/git-sync
+rm -r ~/.local/share/git-sync   # if installed with --hints
 rm -r ~/.git-sync
 ```
 
@@ -216,4 +238,4 @@ sh tests/run.sh test_name ...   # selected tests
 ```
 
 Tests run in temporary sandboxes with stubbed `launchctl` and notifier, so they
-never touch your real `~/.git-sync` or LaunchAgents.
+never touch your real `~/.git-sync` or LaunchAgents. Completion tests need zsh for the zsh cases and skip them without it.
