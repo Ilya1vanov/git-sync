@@ -245,6 +245,20 @@ is_online() {
   $GS_ROUTE -n get default >/dev/null 2>&1
 }
 
+# needs_offline_check ENTRIES: rc 0 unless every repo (one per line) is a valid repo
+# whose effective mode is maintain-only; those runs need no network.
+needs_offline_check() {
+  local repo
+  while IFS= read -r repo; do
+    [ -n "$repo" ] || continue
+    git -C "$repo" rev-parse --git-dir >/dev/null 2>&1 || return 0
+    [ "$(cfg_get sync.mode "$repo")" = maintain-only ] || return 0
+  done <<EOF
+$1
+EOF
+  return 1
+}
+
 lock_release() {
   if [ "$(cat "$GS_LOCK/pid" 2>/dev/null)" = "$$" ]; then
     rm -rf "$GS_LOCK"
@@ -886,7 +900,7 @@ cmd_sync() {
     echo "another run in progress"
     return 0
   fi
-  if ! is_online; then
+  if needs_offline_check "$entries" && ! is_online; then
     log_msg INFO "offline, run skipped"
     [ "$GS_JOB" = 1 ] && return 0
     echo "offline"
