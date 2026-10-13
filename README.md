@@ -18,6 +18,7 @@ git-sync init          # creates ~/.git-sync with default config
 cd /path/to/repo
 git-sync install       # register the repo (repeat per repo)
 git-sync install -r ~/projects   # or: register every repo directly inside a folder
+git-sync install -r ~/projects --watch   # ...and future clones there too (see Watched roots)
 git-sync start         # write the LaunchAgent and load it
 ```
 
@@ -35,8 +36,8 @@ to your shell's rc file. Enabling it is up to you; rc files are never edited.
 [ -f ~/.local/share/git-sync/git-sync-completion.sh ] && . ~/.local/share/git-sync/git-sync-completion.sh
 ```
 
-Completes commands, flags, config keys and values, and registered repos for
-`uninstall` and `sync`, with a short description for each. zsh shows the
+Completes commands, flags, config keys and values, registered repos for
+`uninstall` and `sync`, and watched roots for `uninstall -r --watch`, with a short description for each. zsh shows the
 descriptions in its menu and a hint for free-form values such as
 `sync.period`. bash shows them when you press Tab twice with several
 matches. In bash, contexts with no candidates fall back to filename
@@ -87,6 +88,8 @@ Resolution order: per-repo value, then global value, then default. Inspect with
 | `log.maxSize` | no | `3M` | number with optional `K`/`M`/`G`, bytes if no unit |
 | `notify.enabled` | no | `false` | `true`, `false` |
 | `notify.events` | no | `blocked` | non-empty subset of `finished blocked` |
+| `sync.root` | no | unset | read-only: watched roots (managed by `install -r --watch`/`uninstall -r --watch`) |
+| `sync.exclude` | no | unset | read-only: excluded repos (managed by `uninstall`/`install`) |
 
 ```sh
 git-sync config sync.mode maintain-and-fetch      # this repo only
@@ -95,16 +98,56 @@ git-sync config --global sync.period 1h           # global, reloads agent
 git-sync config --unset sync.mode                 # revert to the next level
 ```
 
-`sync.repo` (the repo list) is managed only by `install`/`uninstall`.
+`sync.repo` (the repo list), `sync.root` and `sync.exclude` are managed only
+by `install`/`uninstall`; `git-sync config` prints them but refuses to set them.
 `install -r <dir>` registers each immediate subdirectory of `<dir>` that is a
 git working tree (depth 1, hidden folders skipped); linked worktrees resolve to
-their main worktree, so they are counted as already installed.
+their main worktree, so they are counted as already installed. Excluded repos
+(see Watched roots) are skipped and counted in the summary
+(`1 installed, 0 already installed, 0 failed, 1 excluded`).
 Unknown keys are rejected unless `--force` is given.
+
+## Watched roots
+
+```sh
+git-sync install -r ~/projects --watch     # install the repos there now, and watch the folder
+git-sync uninstall -r ~/projects --watch   # stop watching; installed repos stay
+```
+
+Every `sync --all` run (job or manual) scans each watched root with the same
+depth-1 rules as `install -r` and installs any repo not yet in the sync list,
+logging `installed <path> (watched root <dir>)` at INFO. A new clone is synced
+in the same run that installs it. The scan runs after taking the lock and
+before the offline check, so an offline skip still installs new repos and the
+next online run syncs them. `sync` and `sync <path>` never scan.
+
+- Watching a folder with no repos yet is fine; watching it again changes
+  nothing. Roots are stored as canonical absolute paths.
+- For 24 hours after a watch installs a repo, `status` shows a `new` note on it.
+  Repos you install yourself are never marked `new`.
+- `uninstall <repo>` on a repo directly inside a watched root records an
+  *exclusion*, so the scan does not add it back, even after you delete and
+  re-clone it. `install <repo>` removes the exclusion. An excluded main
+  worktree also keeps its linked worktrees under a watched root out.
+- Unwatching keeps the folder's repos installed and keeps its exclusions; run
+  `uninstall <repo>` for each repo you also want to stop syncing.
+- A missing or unreadable root is logged as a warning (and printed on stderr in
+  manual runs) and does not change the exit code or notifications. A folder
+  with a `.git` that is not a usable repository (corrupt, or refused by
+  `safe.directory`) is skipped with a warning in the log on every run.
+- Repos are never removed from the sync list on their own: a deleted clone
+  stays listed as `missing`.
+
+**Trust.** A watched repo is synced with its own local git config:
+`core.sshCommand`, credential helpers, and anything else its config reaches.
+Watching a folder is consent to that for every repo that later appears in it.
+Only watch folders where you clone repos you trust.
 
 ## Commands
 
 ```
-git-sync init | install [<path>] | install -r <dir> | uninstall [<path>] | list
+git-sync init | install [<path>] | install -r <dir> [--watch] | uninstall [<path>] | list
+git-sync uninstall -r <dir> --watch
 git-sync status [--verbose] [--list-order]
 git-sync start | stop
 git-sync config [--global] [--force] [--unset] [<key> [<value>]]
@@ -185,7 +228,8 @@ git-sync status --verbose  # full per-repo detail: mode, last run/success,
                            #   every blocker with its detail, every note
 git-sync status -l         # keep sync-list order (default: blocked, error,
                            #   missing first, then the rest; combines with -v)
-git-sync list              # one line per repo: path, mode, last result
+git-sync list              # one line per repo: path, mode, last result, then
+                           #   "Watched roots:" and "Excluded:" sections if any
 ```
 
 Compact example:
@@ -198,9 +242,11 @@ ok       < 1m ago       ~/projects/app
 ok       5 minutes ago  ~/projects/web
                         note: main: skipped (checked out)
 pending  never          ~/projects/new
+                        note: new
 ```
 
-`pending` means the repo is registered but has not been synced yet.
+`pending` means the repo is registered but has not been synced yet. `new`
+marks a repo a watched root installed less than 24 hours ago.
 
 During an offline streak (consecutive offline skips), the header shows one more
 line after `Notifications:`:

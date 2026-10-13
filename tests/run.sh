@@ -140,7 +140,8 @@ EOF
 
 # --- tests ---
 test_help() {
-  out=$(gs help) && assert_contains "$out" "Usage: git-sync" && assert_contains "$out" "notifications"
+  out=$(gs help) && assert_contains "$out" "Usage: git-sync" && assert_contains "$out" "notifications" &&
+  assert_contains "$out" "install -r <dir> --watch" && assert_contains "$out" "uninstall -r <dir> --watch"
 }
 test_unknown_command_exit2() {
   gs bogus >/dev/null 2>"$T/err"; rc=$?
@@ -880,6 +881,154 @@ test_install_recursive_no_repos_and_bad_dir() {
   assert_contains "$(cat "$T/err")" "not a directory: $T/nope" &&
   { gs install -r 2>/dev/null; assert_eq $? 2; }
 }
+roots() { git config -f "$GIT_SYNC_HOME/config" --get-all sync.root; }
+excludes() { git config -f "$GIT_SYNC_HOME/config" --get-all sync.exclude; }
+test_watch_install_adds_root() {
+  gs init >/dev/null && make_repos && mkdir "$T/pro: jects" &&
+  git clone -q "$T/remote.git" "$T/pro: jects/a" &&
+  out=$(gs install -r "$T/pro: jects" --watch) &&
+  assert_contains "$out" "Installed: $T/pro: jects/a" &&
+  assert_contains "$out" "Watching: $T/pro: jects" &&
+  assert_eq "$(roots)" "$T/pro: jects" &&
+  assert_eq "$(gs config sync.root)" "$T/pro: jects"
+}
+test_watch_empty_folder_and_already_watched() {
+  gs init >/dev/null && mkdir "$T/empty" && ln -s "$T/empty" "$T/link" &&
+  out=$(gs install -r "$T/empty" --watch) &&
+  assert_contains "$out" "Watching: $T/empty" &&
+  out=$(cd "$T" && gs install -r link/ --watch) &&
+  assert_eq "$out" "Already watched: $T/empty" &&
+  assert_eq "$(roots)" "$T/empty" &&
+  { gs install -r "$T/nope" --watch 2>/dev/null; assert_eq $? 1; } &&
+  { gs install -r "$T/empty" --bogus 2>/dev/null; assert_eq $? 2; } &&
+  assert_eq "$(roots)" "$T/empty"
+}
+test_config_root_exclude_read_only() {
+  gs init >/dev/null && mkdir "$T/p" && gs install -r "$T/p" --watch >/dev/null &&
+  assert_eq "$(gs config sync.root)" "$T/p" &&
+  { gs config sync.exclude >/dev/null; assert_eq $? 1; } &&
+  { gs config --global sync.root /x 2>"$T/err"; assert_eq $? 2; } &&
+  assert_contains "$(cat "$T/err")" "sync.root is managed by 'git-sync install/uninstall'" &&
+  { gs config --global --unset sync.exclude 2>"$T/err"; assert_eq $? 2; } &&
+  assert_contains "$(cat "$T/err")" "sync.exclude is managed by 'git-sync install/uninstall'" &&
+  assert_not_contains "$(gs config)" "sync.root" && assert_eq "$(roots)" "$T/p"
+}
+test_watch_scan_installs_and_syncs_new_clone() {
+  gs init >/dev/null && make_repos && mkdir "$T/a: b" && gs install -r "$T/a: b" --watch >/dev/null &&
+  git clone -q "$T/remote.git" "$T/a: b/new c" && push_commit main m2 &&
+  out=$(gs sync --all) &&
+  assert_contains "$out" "$T/a: b/new c: ok" &&
+  assert_contains "$(gs list)" "$T/a: b/new c  fast-forward  ok" &&
+  assert_eq "$(git -C "$T/a: b/new c" rev-parse refs/remotes/origin/main)" "$(git -C "$T/remote.git" rev-parse main)" &&
+  assert_contains "$(cat "$GIT_SYNC_HOME/git-sync.log")" "INFO installed $T/a: b/new c (watched root $T/a: b)" &&
+  gs sync --all >/dev/null &&
+  assert_eq "$(git config -f "$GIT_SYNC_HOME/config" --get-all sync.repo)" "$T/a: b/new c"
+}
+test_watch_sync_path_does_not_scan() {
+  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null && mkdir "$T/p" &&
+  gs install -r "$T/p" --watch >/dev/null && git clone -q "$T/remote.git" "$T/p/x" &&
+  (cd "$WORK" && gs sync >/dev/null) && gs sync "$WORK" >/dev/null &&
+  assert_eq "$(git config -f "$GIT_SYNC_HOME/config" --get-all sync.repo)" "$WORK"
+}
+test_watch_offline_skip_still_installs() {
+  gs init >/dev/null && make_repos && mkdir "$T/p" && gs install -r "$T/p" --watch >/dev/null &&
+  git clone -q "$T/remote.git" "$T/p/x" && touch "$T/offline" &&
+  { gs sync --all >/dev/null 2>&1; assert_eq $? 1; } &&
+  assert_eq "$(git config -f "$GIT_SYNC_HOME/config" --get-all sync.repo)" "$T/p/x" &&
+  assert_contains "$(gs list)" "$T/p/x  fast-forward  never" &&
+  rm "$T/offline" && gs sync --all >/dev/null && assert_eq "$(sget "$T/p/x" result)" ok
+}
+test_watch_uninstall_excludes_until_install() {
+  gs init >/dev/null && make_repos && mkdir "$T/p: q" && git clone -q "$T/remote.git" "$T/p: q/x y" &&
+  gs install -r "$T/p: q" --watch >/dev/null &&
+  out=$(gs uninstall "$T/p: q/x y") && assert_contains "$out" "Uninstalled: $T/p: q/x y" &&
+  assert_eq "$(excludes)" "$T/p: q/x y" &&
+  rm -rf "$T/p: q/x y" && git clone -q "$T/remote.git" "$T/p: q/x y" &&
+  gs sync --all >/dev/null && assert_eq "$(gs list | sed -n 1p)" "No repos." &&
+  out=$(gs install -r "$T/p: q") &&
+  assert_contains "$out" "0 installed, 0 already installed, 0 failed, 1 excluded" &&
+  assert_eq "$(git config -f "$GIT_SYNC_HOME/config" --get-all sync.repo)" "" &&
+  gs install "$T/p: q/x y" >/dev/null && assert_eq "$(excludes)" "" &&
+  gs uninstall "$T/p: q/x y" >/dev/null && gs install "$T/p: q/x y" >/dev/null &&
+  gs uninstall "$T/p: q/x y" >/dev/null && assert_eq "$(excludes)" "$T/p: q/x y" &&
+  git config -f "$GIT_SYNC_HOME/config" --add sync.repo "$T/p: q/x y" &&
+  out=$(gs install "$T/p: q/x y") && assert_contains "$out" "Already installed" && assert_eq "$(excludes)" ""
+}
+test_watch_unwatch_keeps_repos_and_exclusions() {
+  gs init >/dev/null && make_repos && mkdir "$T/p: q" && ln -s "$T/p: q" "$T/l" &&
+  git clone -q "$T/remote.git" "$T/p: q/a" && git clone -q "$T/remote.git" "$T/p: q/b" &&
+  gs install -r "$T/p: q" --watch >/dev/null && gs uninstall "$T/p: q/b" >/dev/null &&
+  out=$(gs uninstall -r "$T/l" --watch) && assert_eq "$out" "Unwatched: $T/p: q" &&
+  assert_eq "$(roots)" "" && assert_eq "$(excludes)" "$T/p: q/b" &&
+  git clone -q "$T/remote.git" "$T/p: q/c" && gs sync --all >/dev/null &&
+  assert_eq "$(git config -f "$GIT_SYNC_HOME/config" --get-all sync.repo)" "$T/p: q/a" &&
+  { gs uninstall -r "$T/p: q" --watch 2>"$T/err"; assert_eq $? 1; } &&
+  assert_contains "$(cat "$T/err")" "not a watched root: $T/p: q" &&
+  { gs uninstall -r "$T/p: q" 2>/dev/null; assert_eq $? 2; } &&
+  gs install -r "$T/p: q" --watch >/dev/null && rm -rf "$T/p: q" &&
+  gs uninstall -r "$T/p: q/" --watch >/dev/null && assert_eq "$(roots)" ""
+}
+test_watch_missing_root_warns() {
+  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null && mkdir "$T/p q" &&
+  gs install -r "$T/p q" --watch >/dev/null && rmdir "$T/p q" &&
+  gs sync --all >/dev/null 2>"$T/err" &&
+  assert_eq "$(cat "$T/err")" "git-sync: warning: watched root missing or unreadable: $T/p q" &&
+  gs sync --all --job >/dev/null 2>"$T/err" && assert_eq "$(cat "$T/err")" "" &&
+  assert_eq "$(grep -c "WARN watched root missing or unreadable: $T/p q" "$GIT_SYNC_HOME/git-sync.log")" 2 &&
+  gs notifications enable >/dev/null && gs config --global notify.events "blocked finished" &&
+  gs sync --all --job && assert_eq "$(cat "$T/notify.calls")" "git-sync|1 repos: 1 ok, 0 blocked, 0 failed"
+}
+test_watch_bad_child_skipped() {
+  gs init >/dev/null && make_repos && mkdir -p "$T/p/bad" && echo "gitdir: $T/nope" > "$T/p/bad/.git" &&
+  gs install -r "$T/p" --watch >/dev/null 2>&1; git clone -q "$T/remote.git" "$T/p/good" &&
+  gs sync --all >/dev/null 2>"$T/err" && gs sync --all >/dev/null 2>&1 &&
+  assert_eq "$(cat "$T/err")" "" &&
+  assert_eq "$(git config -f "$GIT_SYNC_HOME/config" --get-all sync.repo)" "$T/p/good" &&
+  assert_eq "$(grep -c "WARN skipped $T/p/bad: not a usable repository (watched root $T/p)" "$GIT_SYNC_HOME/git-sync.log")" 2
+}
+test_watch_list_sections() {
+  gs init >/dev/null && make_repos && mkdir "$T/p" "$T/q r" && git clone -q "$T/remote.git" "$T/p/a" &&
+  gs install -r "$T/p" --watch >/dev/null && gs install -r "$T/q r" --watch >/dev/null &&
+  assert_eq "$(gs list)" "$(printf '%s\n\n%s\n%s\n%s' "$T/p/a  fast-forward  never" "Watched roots:" "  $T/p" "  $T/q r")" &&
+  gs uninstall "$T/p/a" >/dev/null &&
+  assert_eq "$(gs list)" "$(printf '%s\n\n%s\n%s\n%s\n\n%s\n%s' "No repos." "Watched roots:" "  $T/p" "  $T/q r" "Excluded:" "  $T/p/a")" &&
+  gs uninstall -r "$T/p" --watch >/dev/null && gs uninstall -r "$T/q r" --watch >/dev/null &&
+  assert_eq "$(gs list)" "$(printf '%s\n\n%s\n%s' "No repos." "Excluded:" "  $T/p/a")"
+}
+test_watch_new_note_24h() {
+  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null && mkdir "$T/p" &&
+  gs install -r "$T/p" --watch >/dev/null && git clone -q "$T/remote.git" "$T/p/x" &&
+  touch "$T/offline" && quiet "$GS" sync --all && rm "$T/offline" &&
+  assert_contains "$(gs status)" "$(printf 'pending  never          %s\n%24snote: new' "$T/p/x" '')" &&
+  gs sync --all >/dev/null && gs sync --all >/dev/null &&
+  [ -n "$(sget "$T/p/x" watchInstalled)" ] &&
+  assert_contains "$(gs status)" "$(printf 'ok       < 1m ago       %s\n%24snote: new' "$T/p/x" '')" &&
+  assert_contains "$(gs status -v)" "$(printf '%s\n  mode:          fast-forward\n  result:        ok' "$T/p/x")" &&
+  assert_contains "$(gs status -v)" "  note:          new" &&
+  assert_eq "$(gs status | grep -c 'note: new')" 1 &&
+  git config -f "$(sf_of "$T/p/x")" status.watchInstalled "$(date -v-23H +%Y-%m-%dT%H:%M:%S%z)" &&
+  assert_contains "$(gs status)" "note: new" &&
+  git config -f "$(sf_of "$T/p/x")" status.watchInstalled "$(date -v-25H +%Y-%m-%dT%H:%M:%S%z)" &&
+  assert_not_contains "$(gs status)" "note: new" && assert_not_contains "$(gs status -v)" "new"
+}
+test_watch_uninstall_outside_root_no_exclusion() {
+  gs init >/dev/null && make_repos && mkdir -p "$T/p/deep" && gs install -r "$T/p" --watch >/dev/null &&
+  git clone -q "$T/remote.git" "$T/p/deep/x" && gs install "$T/p/deep/x" >/dev/null &&
+  gs install "$WORK" >/dev/null && gs uninstall "$WORK" >/dev/null && gs uninstall "$T/p/deep/x" >/dev/null &&
+  assert_eq "$(excludes)" ""
+}
+test_watch_linked_worktrees() {
+  gs init >/dev/null && make_repos && mkdir "$T/p" "$T/q" &&
+  git -C "$WORK" worktree add -q "$T/p/work-wt" -b f1 &&
+  git clone -q "$T/remote.git" "$T/q/m" && git -C "$T/q/m" worktree add -q "$T/q/m-wt" -b f2 &&
+  gs install -r "$T/p" --watch >/dev/null 2>&1 && gs install -r "$T/q" --watch >/dev/null 2>&1 &&
+  assert_eq "$(git config -f "$GIT_SYNC_HOME/config" --get-all sync.repo | sort)" "$(printf '%s\n%s' "$T/q/m" "$WORK" | sort)" &&
+  gs uninstall "$WORK" >/dev/null && gs uninstall "$T/q/m" >/dev/null &&
+  assert_eq "$(excludes)" "$T/q/m" &&
+  gs sync --all >/dev/null &&
+  assert_eq "$(git config -f "$GIT_SYNC_HOME/config" --get-all sync.repo)" "$WORK" &&
+  assert_contains "$(cat "$GIT_SYNC_HOME/git-sync.log")" "installed $WORK (watched root $T/p)"
+}
 test_config_jobs_jitter() {
   "$GS" init >/dev/null &&
   assert_eq "$(gs config sync.jobs)" 8 && assert_eq "$(gs config sync.jitter)" 5s &&
@@ -961,9 +1110,19 @@ test_hints_commands() {
 }
 test_hints_install() {
   assert_eq "$(hints install)" "$(printf -- '-r\tAdd every repo directly inside <dir>\n@dirs')" &&
-  assert_eq "$(hints install -r)" "@dirs" &&
+  assert_eq "$(hints install -r)" "$(printf -- '--watch\tAlso install future clones in <dir>\n@dirs')" &&
   assert_eq "$(hints install some/dir)" "" &&
-  assert_eq "$(hints install -r some/dir)" ""
+  assert_eq "$(hints install -r some/dir)" "$(printf -- '--watch\tAlso install future clones in <dir>')" &&
+  assert_eq "$(hints install -r --watch)" "@dirs" &&
+  assert_eq "$(hints install -r some/dir --watch)" ""
+}
+test_hints_uninstall_watch() {
+  assert_eq "$(hints uninstall -r 2>&1)" "$(printf -- '--watch\tStop watching <dir>')" &&
+  gs init >/dev/null && mkdir "$T/p: q" && gs install -r "$T/p: q" --watch >/dev/null &&
+  assert_eq "$(hints uninstall -r)" "$(printf -- '--watch\tStop watching <dir>\n%s\twatched root' "$T/p: q")" &&
+  assert_eq "$(hints uninstall -r --watch)" "$(printf '%s\twatched root' "$T/p: q")" &&
+  assert_eq "$(hints uninstall -r "$T/p: q")" "$(printf -- '--watch\tStop watching <dir>')" &&
+  assert_eq "$(hints uninstall -r --watch "$T/p: q")" ""
 }
 test_hints_repos() {
   assert_eq "$(hints uninstall 2>&1)" "" &&
@@ -1000,7 +1159,7 @@ test_hints_config() {
   assert_eq "$(hints config bogus.key)" ""
 }
 test_hints_keys_match_cli() {
-  want=$(sed -n 's/^ *\(sync\.period|.*\)) return 0 ;;$/\1/p' "$GS" | tr '|' '\n' | grep -vx sync.repo | sort) &&
+  want=$(sed -n 's/^ *\(sync\.period|.*\)) return 0 ;;$/\1/p' "$GS" | tr '|' '\n' | grep -vxF -e sync.repo -e sync.root -e sync.exclude | sort) &&
   got=$(hints config | cut -f1 | grep -v '^-' | sort) &&
   [ -n "$want" ] && assert_eq "$got" "$want"
 }
@@ -1012,7 +1171,7 @@ test_hints_notifications() {
 test_hints_zsh_parity() {
   command -v zsh >/dev/null || { echo "    (skipped: no zsh)" >&2; return 0; }
   gs init >/dev/null && make_repos "sp ace" && gs install "$WORK" >/dev/null &&
-  for args in "" "install" "install -r" "sync" "uninstall" "status -v" "config" "config --global sync.mode" "config sync.period" "config --global sync.disableOfflineCheck" "notifications"; do
+  for args in "" "install" "install -r" "sync" "uninstall" "uninstall -r" "status -v" "config" "config --global sync.mode" "config sync.period" "config --global sync.disableOfflineCheck" "notifications"; do
     assert_eq "$(hints_in zsh $args)" "$(hints_in bash $args)" "args: $args" || return 1
   done
 }
@@ -1066,7 +1225,7 @@ test_zsh_complete_frontend() {
   out=$(zsh_complete git-sync install "") &&
   assert_contains "$out" "describe -r:Add every repo directly inside <dir>" &&
   assert_contains "$out" "files -/" &&
-  assert_eq "$(zsh_complete git-sync install -r "")" "files -/" &&
+  assert_eq "$(zsh_complete git-sync install -r "")" "$(printf '%s\n%s' "describe --watch:Also install future clones in <dir>" "files -/")" &&
   assert_eq "$(zsh_complete git-sync config sync.period "")" "message number with optional s/m/h, at least 60s (e.g. 20m)" &&
   assert_eq "$(zsh_complete git-sync list "")" ""
 }

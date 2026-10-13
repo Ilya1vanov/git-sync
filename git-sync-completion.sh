@@ -14,7 +14,35 @@ __git_sync_repos() {
     while IFS= read -r r; do __git_sync_hint "$r" "registered repo"; done
 }
 
-# __git_sync_keys: settable config keys (sync.repo is managed by install/uninstall).
+# __git_sync_roots: one candidate per watched root; silent if not initialized.
+__git_sync_roots() {
+  local r
+  git config -f "${GIT_SYNC_HOME:-$HOME/.git-sync}/config" --get-all sync.root 2>/dev/null |
+    while IFS= read -r r; do __git_sync_hint "$r" "watched root"; done
+}
+
+# __git_sync_root_args install|uninstall WORD...: hints for the words after "-r":
+# --watch until given, then a directory (install) or a watched root (uninstall).
+__git_sync_root_args() {
+  local cmd=$1 a watch=0 dir=0
+  shift
+  for a in "$@"; do
+    case $a in --watch) watch=1 ;; -*) ;; *) dir=1 ;; esac
+  done
+  if [ "$watch" -eq 0 ]; then
+    if [ "$cmd" = install ]; then
+      __git_sync_hint --watch "Also install future clones in <dir>"
+    else
+      __git_sync_hint --watch "Stop watching <dir>"
+    fi
+  fi
+  if [ "$dir" -eq 0 ]; then
+    if [ "$cmd" = install ]; then echo @dirs; else __git_sync_roots; fi
+  fi
+}
+
+# __git_sync_keys: settable config keys (sync.repo, sync.root and sync.exclude
+# are managed by install/uninstall).
 __git_sync_keys() {
   __git_sync_hint sync.period "Agent run interval (global)"
   __git_sync_hint sync.mode "What a sync does"
@@ -76,11 +104,15 @@ __git_sync_hints() {
       if [ $# -eq 0 ]; then
         __git_sync_hint -r "Add every repo directly inside <dir>"
         echo @dirs
-      elif [ $# -eq 1 ] && [ "$1" = -r ]; then
-        echo @dirs
+      elif [ "$1" = -r ]; then
+        shift; __git_sync_root_args install "$@"
       fi ;;
     uninstall)
-      if [ $# -eq 0 ]; then __git_sync_repos; fi ;;
+      if [ $# -eq 0 ]; then
+        __git_sync_repos
+      elif [ "$1" = -r ]; then
+        shift; __git_sync_root_args uninstall "$@"
+      fi ;;
     sync)
       if [ $# -eq 0 ]; then
         __git_sync_hint --all "Sync every listed repo"
