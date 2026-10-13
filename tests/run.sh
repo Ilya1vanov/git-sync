@@ -42,7 +42,7 @@ EOF
 #!/bin/sh
 printf '%s|%s\n' "$1" "$2" >> "$STUB_DIR/notify.calls"
 EOF
-  # route stub: records calls; reports a default route (online) unless $T/offline exists
+  # route stub: records calls; reports a default route (online) unless $STUB_DIR/offline exists
   cat > "$T/bin/route" <<'EOF'
 #!/bin/sh
 echo "$*" >> "$STUB_DIR/route.calls"
@@ -418,18 +418,24 @@ test_offline_manual_runs_skipped() {
   assert_no_file "$(sf_of "$WORK")" && assert_no_file "$(sf_of "$T/un listed")" &&
   assert_eq "$(grep -c 'INFO offline, run skipped' "$GIT_SYNC_HOME/git-sync.log")" 4
 }
-stget() { git config -f "$GIT_SYNC_HOME/state" "offline.$1"; }
+streak_get() { git config -f "$GIT_SYNC_HOME/state" "offline.$1"; }
 test_offline_streak_written_and_updated() {
   gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null && touch "$T/offline" || return 1
   quiet "$GS" sync --all --job
-  since=$(stget since) && last=$(stget lastSkip) &&
+  since=$(streak_get since) && last=$(streak_get lastSkip) &&
   case $since in 20*T*) ;; *) echo "bad since: $since"; return 1 ;; esac &&
   assert_eq "$last" "$since" && assert_no_file "$(sf_of "$WORK")" || return 1
+  sleep 1 && quiet "$GS" sync --all
+  assert_eq "$(streak_get since)" "$since" &&
+  case $(streak_get lastSkip) in "$since"|'') echo "lastSkip not updated"; return 1 ;; esac
+}
+test_offline_zero_repos_keeps_streak() {
+  gs init >/dev/null && touch "$T/offline" &&
   git config -f "$GIT_SYNC_HOME/state" offline.since 2000-01-01T00:00:00+0000 &&
-  git config -f "$GIT_SYNC_HOME/state" offline.lastSkip 2000-01-01T00:00:00+0000 || return 1
-  quiet "$GS" sync --all
-  assert_eq "$(stget since)" 2000-01-01T00:00:00+0000 &&
-  case $(stget lastSkip) in 2000-*|'') echo "lastSkip not updated"; return 1 ;; esac
+  git config -f "$GIT_SYNC_HOME/state" offline.lastSkip 2000-01-02T00:00:00+0000 || return 1
+  quiet "$GS" sync --all --job
+  assert_eq "$(streak_get since)" 2000-01-01T00:00:00+0000 &&
+  assert_eq "$(streak_get lastSkip)" 2000-01-02T00:00:00+0000
 }
 test_offline_streak_status_and_cleared() {
   gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null || return 1
@@ -440,7 +446,7 @@ test_offline_streak_status_and_cleared() {
   assert_eq "$(printf '%s\n' "$out" | sed -n 4p)" \
     "Offline:       skipped since 2000-01-01T00:00:00+0000 (last 2000-01-02T00:00:00+0000)" || return 1
   gs sync --all >/dev/null
-  assert_eq "$(stget since)$(stget lastSkip)" "" && assert_eq "$(sget "$WORK" result)" ok &&
+  assert_eq "$(streak_get since)$(streak_get lastSkip)" "" && assert_eq "$(sget "$WORK" result)" ok &&
   assert_not_contains "$(gs status)" "Offline:"
 }
 test_offline_lock_held_reports_in_progress() {

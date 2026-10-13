@@ -250,18 +250,33 @@ is_online() {
 # Offline streak (global state file, git-config format): since = first skip, lastSkip = latest.
 streak_record() {
   local t; t=$(now)
-  git config -f "$GS_STATE" offline.since >/dev/null 2>&1 || git config -f "$GS_STATE" offline.since "$t"
+  streak_read since >/dev/null || git config -f "$GS_STATE" offline.since "$t"
   git config -f "$GS_STATE" offline.lastSkip "$t"
+}
+# streak_read since|lastSkip: prints the field; rc 1 if no streak.
+streak_read() {
+  git config -f "$GS_STATE" "offline.$1" 2>/dev/null
+}
+streak_clear() {
+  [ ! -f "$GS_STATE" ] || git config -f "$GS_STATE" --remove-section offline 2>/dev/null
+  return 0
+}
+
+is_repo() { git -C "$1" rev-parse --git-dir >/dev/null 2>&1; }
+# mode_fetches MODE: rc 0 if MODE fetches remotes (needs network).
+mode_fetches() {
+  case "$1" in maintain-and-fetch|fast-forward) return 0 ;; esac
+  return 1
 }
 
 # needs_offline_check ENTRIES: rc 0 unless every repo (one per line) is a valid repo
-# whose effective mode is maintain-only; those runs need no network.
+# whose effective mode does not fetch; those runs need no network.
 needs_offline_check() {
   local repo
   while IFS= read -r repo; do
     [ -n "$repo" ] || continue
-    git -C "$repo" rev-parse --git-dir >/dev/null 2>&1 || return 0
-    [ "$(cfg_get sync.mode "$repo")" = maintain-only ] || return 0
+    is_repo "$repo" || return 0
+    ! mode_fetches "$(cfg_get sync.mode "$repo")" || return 0
   done <<EOF
 $1
 EOF
@@ -569,16 +584,16 @@ sync_repo() {
     SYNC_RESULT=missing
     log_msg WARN "$repo: missing"
     mode=$(cfg_get sync.mode)
-  elif ! git -C "$repo" rev-parse --git-dir >/dev/null 2>&1; then
+  elif ! is_repo "$repo"; then
     SYNC_RESULT=error
     mode=$(cfg_get sync.mode)
     add_blocker repo:invalid "not a git repository"
   else
     mode=$(cfg_get sync.mode "$repo")
     git_env_for "$repo"
-    case "$mode" in
-      maintain-and-fetch|fast-forward) sync_fetch "$repo" ;;
-    esac
+    if mode_fetches "$mode"; then
+      sync_fetch "$repo"
+    fi
     if [ "$mode" = fast-forward ]; then
       sync_ff "$repo"
     fi
@@ -916,9 +931,9 @@ cmd_sync() {
     echo "offline"
     return 1
   fi
-  # A syncing run ends any offline streak.
-  [ ! -f "$GS_STATE" ] || git config -f "$GS_STATE" --remove-section offline 2>/dev/null
   n=$(printf '%s' "$entries" | grep -c .)
+  # A run that actually syncs a repo ends any offline streak.
+  [ "$n" = 0 ] || streak_clear
   log_msg INFO "run start ($n repos)"
   if [ "$all" = 0 ]; then
     if repo_listed "$repo"; then
@@ -1231,8 +1246,8 @@ cmd_status() {
   else
     echo "Notifications: disabled"
   fi
-  since=$(git config -f "$GS_STATE" offline.since 2>/dev/null) &&
-    echo "Offline:       skipped since $since (last $(git config -f "$GS_STATE" offline.lastSkip 2>/dev/null))"
+  since=$(streak_read since) &&
+    echo "Offline:       skipped since $since (last $(streak_read lastSkip))"
   if [ -z "$(list_repos)" ]; then
     echo "No repos."
     return 0
