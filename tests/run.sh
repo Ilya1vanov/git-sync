@@ -3,6 +3,7 @@
 set -u
 ROOT=$(cd -P "$(dirname "$0")/.." && pwd)
 GS="$ROOT/git-sync"
+COMP="$ROOT/git-sync-completion.sh"
 FAILS=0
 PASSES=0
 
@@ -72,6 +73,13 @@ gs() {
 }
 # quiet CMD...: run, discard output, always succeed (for steps whose exit code is not under test).
 quiet() { "$@" >/dev/null 2>&1; return 0; }
+# hints_in SHELL WORD...: prints __git_sync_hints output for WORDs, run in SHELL (bash|zsh).
+hints_in() {
+  local sh=$1; shift
+  [ "$sh" = zsh ] && sh="zsh -f"
+  $sh -c '. "$1"; shift; __git_sync_hints "$@"' _ "$COMP" "$@"
+}
+hints() { hints_in bash "$@"; }
 
 # --- tests ---
 test_help() {
@@ -750,6 +758,67 @@ test_stale_runfile_removed() {
   gs sync --all >/dev/null &&
   assert_contains "$(cat "$GIT_SYNC_HOME/git-sync.log")" "run end: 1 ok, 0 blocked, 0 failed" &&
   assert_no_file "$GIT_SYNC_HOME/run.99999"
+}
+test_hints_commands() {
+  out=$(hints) &&
+  assert_eq "$(echo "$out" | cut -f1 | tr '\n' ' ')" "init install uninstall list status start stop config sync notifications help " &&
+  assert_contains "$out" "$(printf 'sync\tSync the current (or given) repo, or all listed repos')" &&
+  assert_not_contains "$out" "__sync-one"
+}
+test_hints_install() {
+  assert_eq "$(hints install)" "$(printf -- '-r\tAdd every repo directly inside <dir>\n@dirs')" &&
+  assert_eq "$(hints install -r)" "@dirs" &&
+  assert_eq "$(hints install some/dir)" "" &&
+  assert_eq "$(hints install -r some/dir)" ""
+}
+test_hints_repos() {
+  assert_eq "$(hints uninstall 2>&1)" "" &&
+  assert_eq "$(hints sync 2>&1 | cut -f1)" "--all" &&
+  gs init >/dev/null && make_repos "sp ace" && gs install "$WORK" >/dev/null &&
+  assert_eq "$(hints uninstall)" "$(printf '%s\tregistered repo' "$WORK")" &&
+  out=$(hints sync) &&
+  assert_contains "$out" "$(printf -- '--all\tSync every listed repo')" &&
+  assert_contains "$out" "$(printf '%s\tregistered repo' "$WORK")" &&
+  assert_eq "$(hints sync --all)" "" &&
+  assert_eq "$(hints uninstall "$WORK")" ""
+}
+test_hints_status_flags() {
+  assert_eq "$(hints status | cut -f1 | tr '\n' ' ')" "--verbose --list-order " &&
+  assert_eq "$(hints status -v | cut -f1)" "--list-order" &&
+  assert_eq "$(hints status --list-order | cut -f1)" "--verbose" &&
+  assert_eq "$(hints status --verbose -l)" ""
+}
+test_hints_config() {
+  out=$(hints config) &&
+  assert_contains "$out" "$(printf -- '--global\t')" &&
+  assert_contains "$out" "$(printf 'sync.mode\t')" &&
+  assert_not_contains "$out" "sync.repo" &&
+  assert_not_contains "$(hints config --global | cut -f1)" "--global" &&
+  assert_eq "$(hints config --global sync.mode | cut -f1 | tr '\n' ' ')" "maintain-only maintain-and-fetch fast-forward " &&
+  assert_eq "$(hints config notify.enabled | cut -f1 | tr '\n' ' ')" "true false " &&
+  assert_eq "$(hints config sync.ffCheckedOut | cut -f1 | tr '\n' ' ')" "true false " &&
+  assert_eq "$(hints config notify.events | cut -f1 | tr '\n' ' ')" "blocked finished " &&
+  assert_eq "$(hints config sync.period)" "$(printf '@msg\tnumber with optional s/m/h, at least 60s (e.g. 20m)')" &&
+  assert_eq "$(hints config --unset sync.mode)" "" &&
+  assert_eq "$(hints config sync.mode fast-forward)" "" &&
+  assert_eq "$(hints config bogus.key)" ""
+}
+test_hints_keys_match_cli() {
+  want=$(sed -n 's/^ *\(sync\.period|.*\)) return 0 ;;$/\1/p' "$GS" | tr '|' '\n' | grep -vx sync.repo | sort) &&
+  got=$(hints config | cut -f1 | grep -v '^-' | sort) &&
+  [ -n "$want" ] && assert_eq "$got" "$want"
+}
+test_hints_notifications() {
+  assert_eq "$(hints notifications | cut -f1 | tr '\n' ' ')" "enable disable " &&
+  assert_eq "$(hints notifications enable)" "" &&
+  assert_eq "$(hints list)" ""
+}
+test_hints_zsh_parity() {
+  command -v zsh >/dev/null || { echo "    (skipped: no zsh)" >&2; return 0; }
+  gs init >/dev/null && make_repos "sp ace" && gs install "$WORK" >/dev/null &&
+  for args in "" "install" "install -r" "sync" "uninstall" "status -v" "config" "config --global sync.mode" "config sync.period" "notifications"; do
+    assert_eq "$(hints_in zsh $args)" "$(hints_in bash $args)" "args: $args" || return 1
+  done
 }
 
 # --- runner ---
