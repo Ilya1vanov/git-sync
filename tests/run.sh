@@ -661,6 +661,54 @@ test_fetch_timeout_kill_escalation() {
   assert_eq "$(blockers)" "fetch-timeout:origin timed out after 1" &&
   assert_eq "$(marked)" ""
 }
+# poll TENTHS CONDITION: re-evaluates CONDITION every 0.1s; fails after TENTHS tries.
+poll() {
+  local n=0
+  until eval "$2"; do n=$((n + 1)); [ "$n" -lt "$1" ] || return 1; sleep 0.1; done
+}
+# interrupted_run FETCHES SIG ARGS...: starts `git-sync ARGS` in the background
+# (own process group, like a terminal job; sync.fetchTimeout must be 53), waits
+# until FETCHES hanging fetches are in flight, then sends SIG: INT to the whole
+# group (Ctrl-C), TERM to the run alone. Checks the run ends promptly and
+# leaves no fetch, ssh or sleeper behind, no lock, no temp dir, no job notice.
+interrupted_run() {
+  local want=$1 sig=$2 pid rc; shift 2
+  set -m; gs_ssh "$@" > "$T/int.out" 2>&1 & pid=$!; set +m
+  poll 100 '[ "$(marked | grep -c .)" -ge "$want" ]' || { echo "    fetches never started"; kill -KILL -"$pid"; return 1; }
+  if [ "$sig" = INT ]; then kill -INT -"$pid"; else kill -TERM "$(cat "$GIT_SYNC_HOME/lock/pid")"; fi
+  poll 50 '! kill -0 "$pid" 2>/dev/null' || { echo "    run still alive after $sig"; kill -KILL -"$pid"; return 1; }
+  wait "$pid" 2>/dev/null; rc=$?
+  [ "$rc" -ne 0 ] || { echo "    interrupted run exited 0"; return 1; }
+  poll 30 '[ -z "$(marked 53)" ]' || { echo "    leaked: $(marked 53 | tr '\n' ' ')"; return 1; }
+  [ ! -d "$GIT_SYNC_HOME/lock" ] || { echo "    lock left behind"; return 1; }
+  assert_eq "$(ls "$GIT_SYNC_HOME" | grep '^fetch\.')" "" &&
+  assert_not_contains "$(cat "$T/int.out")" "Terminated" &&
+  assert_not_contains "$(cat "$T/int.out")" "Interrupt"
+}
+test_interrupt_inline_run_stops_fetch() {
+  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null && hang_stub &&
+  gs config --global sync.fetchTimeout 53 &&
+  git -C "$WORK" remote set-url origin "ssh://example.invalid/x.git" || return 1
+  for sig in TERM INT; do
+    interrupted_run 1 "$sig" sync "$WORK" || { echo "    ($sig)"; return 1; }
+  done
+  # the lock is free: the next run proceeds
+  ssh_stub && out=$(gs_ssh sync "$WORK" 2>&1)
+  assert_eq "$out" "$WORK: blocked (fetch-failed:origin)"
+}
+test_interrupt_parallel_run_stops_fetches() {
+  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null && hang_stub &&
+  git clone -q "$T/remote.git" "$T/r2" && gs install "$T/r2" >/dev/null &&
+  gs config --global sync.fetchTimeout 53 && gs config --global sync.jobs 2 &&
+  git -C "$WORK" remote set-url origin "ssh://example.invalid/x.git" &&
+  git -C "$T/r2" remote set-url origin "ssh://example.invalid/y.git" || return 1
+  for sig in TERM INT; do
+    interrupted_run 2 "$sig" sync --all || { echo "    ($sig)"; return 1; }
+  done
+  ssh_stub && out=$(gs_ssh sync --all 2>&1)
+  assert_contains "$out" "$WORK: blocked (fetch-failed:origin)" &&
+  assert_contains "$out" "$T/r2: blocked (fetch-failed:origin)"
+}
 
 ffsetup() { gs init >/dev/null && make_repos "$@" && gs install "$WORK" >/dev/null; }
 blockers() { git config -f "$(sf_of "$WORK")" --get-all status.blocker; }

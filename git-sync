@@ -315,8 +315,25 @@ lock_acquire() {
   fi
   echo "$$" > "$GS_LOCK/pid"
   trap 'lock_release' EXIT
-  trap 'exit 1' INT TERM
+  trap 'run_interrupted' INT TERM
   return 0
+}
+
+# PID of the xargs running parallel `sync --all` workers; empty otherwise.
+GS_XARGS_PID=
+
+# run_interrupted: INT/TERM handler of a run. Stops the inline fetch, then
+# xargs (frozen first so it starts no new worker) and every worker it started;
+# each worker stops its own fetch. Exiting releases the lock (EXIT trap).
+run_interrupted() {
+  fetch_abort
+  if [ -n "$GS_XARGS_PID" ]; then
+    kill -STOP "$GS_XARGS_PID" 2>/dev/null
+    pkill -TERM -P "$GS_XARGS_PID" 2>/dev/null
+    kill -TERM "$GS_XARGS_PID" 2>/dev/null
+    kill -CONT "$GS_XARGS_PID" 2>/dev/null
+  fi
+  exit 1
 }
 
 # ---- sync engine ----
@@ -420,6 +437,17 @@ fetch_bounded() {
   GS_FETCH_PGID=
   GS_SLEEPER_PGID=
   return "$rc"
+}
+
+# fetch_abort: on interrupt, TERM the active fetch's group (CONT in case it is
+# stopped), stop its sleeper, and remove this process's fetch temp dir.
+fetch_abort() {
+  if [ -n "$GS_FETCH_PGID" ]; then
+    kill -TERM -"$GS_FETCH_PGID" 2>/dev/null
+    kill -CONT -"$GS_FETCH_PGID" 2>/dev/null
+  fi
+  [ -z "$GS_SLEEPER_PGID" ] || kill -TERM -"$GS_SLEEPER_PGID" 2>/dev/null
+  rm -rf "$GS_HOME/fetch.$$"
 }
 
 sync_fetch() {
@@ -708,6 +736,7 @@ jitter_sleep() {
 # cmd___sync_one JOB RUNFILE REPO: xargs worker for parallel `sync --all`.
 cmd___sync_one() {
   GS_JOB=$1
+  trap 'fetch_abort; exit 1' INT TERM
   jitter_sleep
   sync_one_report "$3" 1 "$2"
 }
@@ -1016,7 +1045,11 @@ cmd_sync() {
   if [ "$all" = 1 ]; then
     # Parallel: up to sync.jobs workers, each after a random jitter delay.
     printf '%s\n' "$entries" | grep . | tr '\n' '\0' |
-      xargs -0 -n 1 -P "$(cfg_get sync.jobs)" "$(self_path)" __sync-one "$GS_JOB" "$runfile"
+      xargs -0 -n 1 -P "$(cfg_get sync.jobs)" "$(self_path)" __sync-one "$GS_JOB" "$runfile" &
+    # In the background so that `wait` lets INT/TERM be handled at once.
+    GS_XARGS_PID=$!
+    wait "$GS_XARGS_PID"
+    GS_XARGS_PID=
   else
     sync_one_report "$repo" "$listed" "$runfile"
   fi
