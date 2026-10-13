@@ -335,6 +335,13 @@ test_sync_all_and_missing() {
   assert_contains "$(cat "$T/out")" "$WORK: ok" && assert_contains "$(cat "$T/out")" "$T/other: missing" &&
   assert_eq "$(sget "$T/other" result)" missing && assert_contains "$(cat "$GIT_SYNC_HOME/git-sync.log")" "WARN"
 }
+test_sync_all_no_repos() {
+  gs init >/dev/null &&
+  { gs sync --all >"$T/out" 2>&1; assert_eq $? 0; } &&
+  { gs sync --all --job >>"$T/out" 2>&1; assert_eq $? 0; } &&
+  assert_eq "$(cat "$T/out")" "" &&
+  assert_eq "$(grep -c "run end: 0 ok, 0 blocked, 0 failed" "$GIT_SYNC_HOME/git-sync.log")" 2
+}
 test_sync_invalid_repo() {
   gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null && rm -rf "$WORK/.git" &&
   { gs sync --all >/dev/null 2>&1; assert_eq $? 1; } &&

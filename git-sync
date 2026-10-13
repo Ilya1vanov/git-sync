@@ -905,6 +905,7 @@ cmd_sync() {
   fi
   while IFS="$(printf '\t')" read -r result keys line; do
     case "$result" in
+      '') continue ;; # empty runfile still yields one blank heredoc line
       ok) ok=$((ok + 1)) ;;
       blocked) blocked=$((blocked + 1)); rc=1 ;;
       *) failed=$((failed + 1)); rc=1 ;;
