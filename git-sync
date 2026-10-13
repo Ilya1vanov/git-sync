@@ -13,6 +13,7 @@ GS_AGENTS_DIR=${GIT_SYNC_AGENTS_DIR:-$HOME/Library/LaunchAgents}
 GS_LABEL=com.git-sync.agent
 GS_PLIST="$GS_AGENTS_DIR/$GS_LABEL.plist"
 GS_LAUNCHCTL=${GIT_SYNC_LAUNCHCTL:-launchctl}
+GS_ROUTE=${GIT_SYNC_ROUTE:-route}
 # Caller's original GIT_SSH_COMMAND (set-ness and value), restored per repo by git_env_for.
 GS_ORIG_SSH_SET=${GIT_SSH_COMMAND+set}
 GS_ORIG_SSH_CMD=${GIT_SSH_COMMAND-}
@@ -237,6 +238,11 @@ log_rotate() {
     mv -f "$GS_LOG" "$GS_LOG.1"
   fi
   return 0
+}
+
+# Offline check: online iff a default route exists. Local routing table only (-n: no DNS).
+is_online() {
+  $GS_ROUTE -n get default >/dev/null 2>&1
 }
 
 lock_release() {
@@ -879,6 +885,12 @@ cmd_sync() {
     log_msg INFO "another run in progress"
     echo "another run in progress"
     return 0
+  fi
+  if ! is_online; then
+    log_msg INFO "offline, run skipped"
+    [ "$GS_JOB" = 1 ] && return 0
+    echo "offline"
+    return 1
   fi
   n=$(printf '%s' "$entries" | grep -c .)
   log_msg INFO "run start ($n repos)"

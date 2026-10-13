@@ -42,8 +42,15 @@ EOF
 #!/bin/sh
 printf '%s|%s\n' "$1" "$2" >> "$STUB_DIR/notify.calls"
 EOF
-  chmod +x "$T/bin/launchctl" "$T/bin/notify"
+  # route stub: records calls; reports a default route (online) unless $T/offline exists
+  cat > "$T/bin/route" <<'EOF'
+#!/bin/sh
+echo "$*" >> "$STUB_DIR/route.calls"
+[ ! -e "$STUB_DIR/offline" ]
+EOF
+  chmod +x "$T/bin/launchctl" "$T/bin/notify" "$T/bin/route"
   export STUB_DIR="$T" GIT_SYNC_LAUNCHCTL="$T/bin/launchctl" GIT_SYNC_NOTIFY_CMD="$T/bin/notify"
+  export GIT_SYNC_ROUTE="$T/bin/route"
   cd "$T" || exit 1
 }
 
@@ -365,6 +372,45 @@ test_lock_held_skips() {
   "$T/bin/git-sync-holder" & pid=$! ; mkdir "$GIT_SYNC_HOME/lock" && echo $pid > "$GIT_SYNC_HOME/lock/pid" &&
   out=$(gs sync --all) ; rc=$? ; kill $pid ;
   assert_eq $rc 0 && assert_contains "$out" "another run in progress" && assert_no_file "$(sf_of "$WORK")"
+}
+test_offline_check_online_syncs() {
+  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null && push_commit develop &&
+  gs sync --all >/dev/null && assert_eq "$(cat "$T/route.calls")" "-n get default" &&
+  assert_eq "$(git -C "$WORK" rev-parse origin/develop)" "$(git -C "$T/remote.git" rev-parse develop)" &&
+  assert_eq "$(sget "$WORK" result)" ok
+}
+test_offline_job_run_skipped() {
+  gs init >/dev/null && gs notifications enable >/dev/null && gs config --global notify.events "blocked finished" &&
+  make_repos && gs install "$WORK" >/dev/null && quiet "$GS" sync --all && rm -f "$T/notify.calls" &&
+  cp "$(sf_of "$WORK")" "$T/status.before" && before=$(git -C "$WORK" rev-parse origin/develop) &&
+  git -C "$WORK" remote add dead "$T/nope.git" && push_commit develop && touch "$T/offline" || return 1
+  out=$(gs sync --all --job 2>&1); rc=$?
+  assert_eq $rc 0 && assert_eq "$out" "" &&
+  cmp -s "$(sf_of "$WORK")" "$T/status.before" &&
+  assert_eq "$(git -C "$WORK" rev-parse origin/develop)" "$before" &&
+  assert_eq "$(ncalls)" "" &&
+  assert_contains "$(cat "$GIT_SYNC_HOME/git-sync.log")" "INFO offline, run skipped"
+}
+test_offline_manual_runs_skipped() {
+  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null && touch "$T/offline" &&
+  git clone -q "$T/remote.git" "$T/un listed" || return 1
+  out=$(gs sync --all 2>&1); rc=$?
+  assert_eq $rc 1 && assert_eq "$out" offline || return 1
+  out=$(cd "$T" && gs sync "$WORK" 2>&1); rc=$?
+  assert_eq $rc 1 && assert_eq "$out" offline || return 1
+  out=$(cd "$WORK" && gs sync 2>&1); rc=$?
+  assert_eq $rc 1 && assert_eq "$out" offline || return 1
+  out=$(cd "$T/un listed" && gs sync 2>&1); rc=$?
+  assert_eq $rc 1 && assert_eq "$out" offline &&
+  assert_no_file "$(sf_of "$WORK")" && assert_no_file "$(sf_of "$T/un listed")" &&
+  assert_eq "$(grep -c 'INFO offline, run skipped' "$GIT_SYNC_HOME/git-sync.log")" 4
+}
+test_offline_lock_held_reports_in_progress() {
+  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null && touch "$T/offline" || return 1
+  printf '#!/bin/sh\nsleep 30\n' > "$T/bin/git-sync-holder" && chmod +x "$T/bin/git-sync-holder" || return 1
+  "$T/bin/git-sync-holder" & pid=$! ; mkdir "$GIT_SYNC_HOME/lock" && echo $pid > "$GIT_SYNC_HOME/lock/pid" &&
+  out=$(gs sync --all) ; rc=$? ; kill $pid ;
+  assert_eq $rc 0 && assert_eq "$out" "another run in progress" && assert_no_file "$T/route.calls"
 }
 test_lock_reused_pid_reclaimed() {
   gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null || return 1

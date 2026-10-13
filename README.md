@@ -122,6 +122,15 @@ git-sync help
 - A linked worktree is registered as its main worktree (with a warning).
 - Only one sync runs at a time (lock in `~/.git-sync/lock`); a concurrent run
   logs that and exits 0.
+- Offline check: after taking the lock and before touching any repo, every run
+  checks for a default network route (`route -n get default`, which reads the
+  local routing table and makes no network or DNS calls). Without one, the run
+  is an offline skip: no repo is fetched or changed, no status file is
+  rewritten, and `offline, run skipped` is logged at INFO. A job run then exits
+  0 and sends no notification (neither `blocked` nor `finished`); a manual run
+  prints `offline` and exits 1. Having a default route does not mean the
+  remotes are reachable (captive portals, networks without internet), so such
+  runs still produce `fetch-failed` blockers.
 
 ## Results and blockers
 
@@ -238,5 +247,5 @@ sh tests/run.sh                 # all tests
 sh tests/run.sh test_name ...   # selected tests
 ```
 
-Tests run in temporary sandboxes with stubbed `launchctl` and notifier, so they
+Tests run in temporary sandboxes with stubbed `launchctl`, `route` and notifier, so they
 never touch your real `~/.git-sync` or LaunchAgents. Completion tests need zsh for the zsh cases and skip them without it.
