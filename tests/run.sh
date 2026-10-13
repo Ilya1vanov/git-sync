@@ -80,6 +80,17 @@ hints_in() {
   $sh -c '. "$1"; shift; __git_sync_hints "$@"' _ "$COMP" "$@"
 }
 hints() { hints_in bash "$@"; }
+# bash_complete WORD...: runs _git_sync with COMP_WORDS=WORDs (last one is being
+# completed); prints COMPREPLY one per line. Prefers /bin/bash (3.2 on macOS).
+bash_complete() {
+  local b=bash
+  [ -x /bin/bash ] && b=/bin/bash
+  "$b" --norc --noprofile -c '
+    . "$1"; shift
+    COMP_WORDS=("$@"); COMP_CWORD=$(($# - 1)); COMPREPLY=()
+    _git_sync
+    if [ ${#COMPREPLY[@]} -gt 0 ]; then printf "%s\n" "${COMPREPLY[@]}"; fi' _ "$COMP" "$@"
+}
 
 # --- tests ---
 test_help() {
@@ -819,6 +830,41 @@ test_hints_zsh_parity() {
   for args in "" "install" "install -r" "sync" "uninstall" "status -v" "config" "config --global sync.mode" "config sync.period" "notifications"; do
     assert_eq "$(hints_in zsh $args)" "$(hints_in bash $args)" "args: $args" || return 1
   done
+}
+test_bash_completion_registers() {
+  out=$(bash --norc --noprofile -c '. "$1" && complete -p git-sync' _ "$COMP" 2>&1) &&
+  assert_contains "$out" "-o default" && assert_contains "$out" "-F _git_sync"
+}
+test_bash_complete_words() {
+  out=$(bash_complete git-sync st) &&
+  assert_eq "$(echo "$out" | wc -l | tr -d ' ')" 3 &&
+  assert_contains "$out" "status  -- Show agent state and per-repo sync status" &&
+  assert_contains "$out" "start   -- Install and load the launchd agent" &&
+  assert_eq "$(bash_complete git-sync sy)" "sync" &&
+  assert_eq "$(bash_complete git-sync config sync.mode fa)" "fast-forward" &&
+  assert_eq "$(bash_complete git-sync status -v --l)" "--list-order" &&
+  assert_eq "$(bash_complete git-sync zz)" ""
+}
+test_bash_complete_install_dirs() {
+  assert_eq "$(bash_complete git-sync install "")" "" &&
+  assert_eq "$(bash_complete git-sync install -)" "-r" &&
+  assert_eq "$(bash_complete git-sync install -r "")" ""
+}
+test_bash_complete_paths() {
+  gs init >/dev/null && make_repos "a:b c" && gs install "$WORK" >/dev/null &&
+  assert_eq "$(bash_complete git-sync uninstall "$T/a")" "$T/a:b\\ c" &&
+  assert_eq "$(bash_complete git-sync uninstall "$T/a:b\\ ")" "$T/a:b\\ c" &&
+  out=$(bash_complete git-sync sync "") &&
+  assert_contains "$out" "--all" && assert_contains "$out" "$T/a:b\\ c" && assert_contains "$out" "-- registered repo"
+}
+test_bash_complete_prefix_words() {
+  gs init >/dev/null && make_repos && git clone -q "$T/remote.git" "$T/app" &&
+  git clone -q "$T/remote.git" "$T/app2" &&
+  gs install "$T/app" >/dev/null && gs install "$T/app2" >/dev/null &&
+  out=$(bash_complete git-sync uninstall "$T/ap") &&
+  assert_eq "$(echo "$out" | wc -l | tr -d ' ')" 2 &&
+  assert_contains "$out" "$T/app   -- registered repo" &&
+  assert_contains "$out" "$T/app2  -- registered repo"
 }
 
 # --- runner ---

@@ -117,5 +117,28 @@ __git_sync_hints() {
 if [ -n "${ZSH_VERSION-}" ]; then
   :
 elif [ -n "${BASH_VERSION-}" ]; then
-  :
+  # Several matches are listed as "word  -- description"; a single match is
+  # inserted bare. Empty COMPREPLY falls back to filenames (-o default).
+  _git_sync() {
+    local cur=${COMP_WORDS[COMP_CWORD]} line word max=0 dirs=0 i
+    local -a words=() descs=()
+    while IFS= read -r line; do
+      case $line in
+        @dirs) dirs=1 ;;
+        @msg*) ;;
+        *)
+          printf -v word '%q' "${line%%$'\t'*}"
+          [[ $word == "$cur"* ]] || continue
+          words+=("$word"); descs+=("${line#*$'\t'}")
+          if (( ${#word} > max )); then max=${#word}; fi ;;
+      esac
+    done < <(__git_sync_hints "${COMP_WORDS[@]:1:COMP_CWORD-1}")
+    COMPREPLY=()
+    if (( dirs )) && [[ $cur != -* ]]; then return 0; fi
+    if (( ${#words[@]} == 1 )); then COMPREPLY=("${words[0]}"); return 0; fi
+    for i in "${!words[@]}"; do
+      COMPREPLY+=("$(printf '%-*s  -- %s' "$max" "${words[i]}" "${descs[i]}")")
+    done
+  }
+  complete -o default -F _git_sync git-sync
 fi
