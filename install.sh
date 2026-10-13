@@ -1,17 +1,7 @@
 #!/bin/sh
-# Installs git-sync into ${PREFIX:-$HOME/.local/bin}.
-# --hints also installs shell completion (bash, zsh) into
-# ${XDG_DATA_HOME:-$HOME/.local/share}/git-sync.
+# Installs git-sync into ${PREFIX:-$HOME/.local/bin} and its shell completion
+# (bash, zsh) into ${XDG_DATA_HOME:-$HOME/.local/share}/git-sync.
 set -u
-HINTS=0
-for arg in "$@"; do
-  case $arg in
-    --hints) HINTS=1 ;;
-    *) echo "install.sh: unknown argument: $arg" >&2
-       echo "Usage: sh install.sh [--hints]" >&2
-       exit 2 ;;
-  esac
-done
 SRC_DIR=$(cd -P "$(dirname "$0")" && pwd)
 DEST_DIR=${PREFIX:-$HOME/.local/bin}
 # put SRC DEST MODE: copies atomically (temp file, then rename).
@@ -21,12 +11,10 @@ put() {
 mkdir -p "$DEST_DIR" || exit 1
 put "$SRC_DIR/git-sync" "$DEST_DIR/git-sync" 755
 echo "Installed $DEST_DIR/git-sync"
-if [ "$HINTS" -eq 1 ]; then
-  HINTS_FILE=${XDG_DATA_HOME:-$HOME/.local/share}/git-sync/git-sync-completion.sh
-  mkdir -p "$(dirname "$HINTS_FILE")" || exit 1
-  put "$SRC_DIR/git-sync-completion.sh" "$HINTS_FILE" 644
-  echo "Installed $HINTS_FILE"
-  echo "Enable hints: add this line to ~/.bashrc, or to ~/.zshrc after compinit:"
-  echo "  [ -f \"$HINTS_FILE\" ] && . \"$HINTS_FILE\""
-fi
+HINTS_FILE=${XDG_DATA_HOME:-$HOME/.local/share}/git-sync/git-sync-completion.sh
+mkdir -p "$(dirname "$HINTS_FILE")" || exit 1
+put "$SRC_DIR/git-sync-completion.sh" "$HINTS_FILE" 644
+echo "Installed $HINTS_FILE"
+echo "Optional completion: add this line to ~/.bashrc, or to ~/.zshrc after compinit:"
+echo "  [ -f \"$HINTS_FILE\" ] && . \"$HINTS_FILE\""
 echo "Next: run 'git-sync init'."

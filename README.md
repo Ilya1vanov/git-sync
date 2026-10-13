@@ -13,7 +13,7 @@ dependencies.
 
 ```sh
 sh install.sh          # copies git-sync to ${PREFIX:-$HOME/.local/bin}
-sh install.sh --hints  # same, plus bash/zsh tab completion (see Shell completion)
+                       #   and its completion to ~/.local/share/git-sync
 git-sync init          # creates ~/.git-sync with default config
 cd /path/to/repo
 git-sync install       # register the repo (repeat per repo)
@@ -26,9 +26,9 @@ reloads the agent. Changing the global `sync.period` reloads it automatically.
 
 ## Shell completion
 
-`sh install.sh --hints` copies `git-sync-completion.sh` to
+`sh install.sh` copies `git-sync-completion.sh` to
 `${XDG_DATA_HOME:-$HOME/.local/share}/git-sync/` and prints one line to add
-to your shell's rc file. It does not edit rc files.
+to your shell's rc file. Enabling it is up to you; rc files are never edited.
 
 ```sh
 # ~/.bashrc, or ~/.zshrc after compinit
@@ -223,7 +223,7 @@ failures are logged and ignored.
 ```sh
 git-sync stop                  # unload agent, remove the plist
 rm ~/.local/bin/git-sync
-rm -r ~/.local/share/git-sync   # if installed with --hints
+rm -r ~/.local/share/git-sync
 rm -r ~/.git-sync
 ```
 
