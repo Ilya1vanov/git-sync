@@ -315,23 +315,82 @@ lock_acquire() {
   fi
   echo "$$" > "$GS_LOCK/pid"
   trap 'lock_release' EXIT
-  trap 'run_interrupted' INT TERM
+  GS_SIG_HANDLER=run_interrupted
+  trap 'on_signal' INT TERM
   return 0
+}
+
+# ---- signals ----
+# INT/TERM run on_signal, which calls GS_SIG_HANDLER. Between sig_defer and
+# sig_resume (while a background job starts and its id is recorded) a signal
+# is only marked pending, then handled by sig_resume, so no job goes untracked.
+GS_SIG_HANDLER=
+GS_SIG_DEFER=
+GS_SIG_PENDING=
+on_signal() {
+  if [ -n "$GS_SIG_DEFER" ]; then
+    GS_SIG_PENDING=1
+    return 0
+  fi
+  "$GS_SIG_HANDLER"
+}
+sig_defer() { GS_SIG_DEFER=1; }
+sig_resume() {
+  GS_SIG_DEFER=
+  [ -z "$GS_SIG_PENDING" ] || "$GS_SIG_HANDLER"
+}
+
+# Poll interval (seconds) of wait_gone.
+GS_POLL=0.2
+
+# wait_gone SECS TARGET...: wait up to SECS seconds until no TARGET (a pid, or
+# -pgid for a process group) is alive. Returns 1 if some still is.
+wait_gone() {
+  local end t alive
+  end=$(( $(date +%s) + $1 )); shift
+  while :; do
+    alive=
+    for t in "$@"; do kill -0 "$t" 2>/dev/null && alive=1; done
+    [ -n "$alive" ] || return 0
+    [ "$(date +%s)" -lt "$end" ] || return 1
+    sleep "$GS_POLL"
+  done
+}
+
+# group_term PGID: TERM a process group, then CONT it in case it is stopped.
+group_term() {
+  kill -TERM -"$1" 2>/dev/null
+  kill -CONT -"$1" 2>/dev/null
+}
+
+# group_reap PGID GRACE: group_term, then KILL the group if it is still alive
+# after GRACE seconds.
+group_reap() {
+  group_term "$1"
+  wait_gone "$2" -"$1" || kill -KILL -"$1" 2>/dev/null
 }
 
 # PID of the xargs running parallel `sync --all` workers; empty otherwise.
 GS_XARGS_PID=
 
 # run_interrupted: INT/TERM handler of a run. Stops the inline fetch, then
-# xargs (frozen first so it starts no new worker) and every worker it started;
-# each worker stops its own fetch. Exiting releases the lock (EXIT trap).
+# xargs (frozen first so it starts no new worker) and every worker it started.
+# Each worker stops its own fetch within GS_ABORT_GRACE; stragglers are killed
+# after that, and temp dirs of workers that died uncleanly are removed (the
+# run holds the lock, so no other run owns them). Exiting releases the lock.
 run_interrupted() {
+  local workers
   fetch_abort
   if [ -n "$GS_XARGS_PID" ]; then
     kill -STOP "$GS_XARGS_PID" 2>/dev/null
-    pkill -TERM -P "$GS_XARGS_PID" 2>/dev/null
+    workers=$(pgrep -P "$GS_XARGS_PID")
+    [ -z "$workers" ] || kill -TERM $workers 2>/dev/null
     kill -TERM "$GS_XARGS_PID" 2>/dev/null
     kill -CONT "$GS_XARGS_PID" 2>/dev/null
+    if [ -n "$workers" ] && ! wait_gone $((GS_ABORT_GRACE + 1)) $workers; then
+      kill -KILL $workers 2>/dev/null
+    fi
+    rm -rf "$GS_HOME"/fetch.*
   fi
   exit 1
 }
@@ -400,35 +459,35 @@ git_env_for() {
 # Active fetch (process group id) and its sleeper (pgid); empty when none runs.
 GS_FETCH_PGID=
 GS_SLEEPER_PGID=
+# Seconds a fetch gets to exit after TERM before KILL: on timeout, on interrupt.
 GS_FETCH_GRACE=5
+GS_ABORT_GRACE=2
 
 # fetch_bounded REPO REMOTE SECS TMPDIR: one `git fetch`, cut off after SECS.
 # The fetch and the sleeper each run in their own process group (job control
 # is on only while starting them), so signals reach every descendant (ssh,
-# credential helpers, proxies). On timeout the sleeper sends TERM to the
-# fetch's group, waits up to GS_FETCH_GRACE seconds, then sends KILL; it
-# touches TMPDIR/timeout first. Returns git's exit status; stderr goes to
-# TMPDIR/err. `wait` stderr is discarded to hide job-control notices.
+# credential helpers, proxies). On timeout the sleeper touches TMPDIR/timeout
+# and reaps the fetch's group (group_reap, GS_FETCH_GRACE); it does nothing if
+# this process is gone by then, as the pgid may have been reused. Returns
+# git's exit status; stderr goes to TMPDIR/err. `wait` stderr is discarded to
+# hide job-control notices.
 fetch_bounded() {
   local repo=$1 r=$2 secs=$3 d=$4 rc
   rm -f "$d/timeout"
+  sig_defer
   set -m
   git -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=60 -C "$repo" fetch --prune --quiet "$r" >/dev/null 2>"$d/err" &
   GS_FETCH_PGID=$!
   (
     sleep "$secs"
+    kill -0 "$$" 2>/dev/null || exit 0
     : > "$d/timeout"
-    kill -TERM -"$GS_FETCH_PGID" 2>/dev/null
-    kill -CONT -"$GS_FETCH_PGID" 2>/dev/null
-    n=0
-    while [ "$n" -lt $((GS_FETCH_GRACE * 5)) ] && kill -0 -"$GS_FETCH_PGID" 2>/dev/null; do
-      sleep 0.2; n=$((n + 1))
-    done
-    kill -KILL -"$GS_FETCH_PGID" 2>/dev/null
+    group_reap "$GS_FETCH_PGID" "$GS_FETCH_GRACE"
     exit 0
   ) </dev/null >/dev/null 2>&1 &
   GS_SLEEPER_PGID=$!
   set +m
+  sig_resume
   wait "$GS_FETCH_PGID" 2>/dev/null
   rc=$?
   # Sleeper fired: let it finish the grace/KILL sequence. Otherwise stop it.
@@ -439,14 +498,12 @@ fetch_bounded() {
   return "$rc"
 }
 
-# fetch_abort: on interrupt, TERM the active fetch's group (CONT in case it is
-# stopped), stop its sleeper, and remove this process's fetch temp dir.
+# fetch_abort: on interrupt, stop the active fetch's sleeper, reap the fetch's
+# group (group_reap, GS_ABORT_GRACE; also when the timeout already fired), and
+# remove this process's fetch temp dir.
 fetch_abort() {
-  if [ -n "$GS_FETCH_PGID" ]; then
-    kill -TERM -"$GS_FETCH_PGID" 2>/dev/null
-    kill -CONT -"$GS_FETCH_PGID" 2>/dev/null
-  fi
   [ -z "$GS_SLEEPER_PGID" ] || kill -TERM -"$GS_SLEEPER_PGID" 2>/dev/null
+  [ -z "$GS_FETCH_PGID" ] || group_reap "$GS_FETCH_PGID" "$GS_ABORT_GRACE"
   rm -rf "$GS_HOME/fetch.$$"
 }
 
@@ -730,13 +787,32 @@ jitter_sleep() {
   max=$(cfg_get sync.jitter)
   max=${max%s}
   [ "$max" -gt 0 ] 2>/dev/null || return 0
-  sleep "$(awk -v m="$max" -v s="$$" 'BEGIN { srand(s); printf "%.2f", rand() * m }')"
+  # In the background so that `wait` lets TERM be handled at once.
+  sig_defer
+  sleep "$(awk -v m="$max" -v s="$$" 'BEGIN { srand(s); printf "%.2f", rand() * m }')" &
+  GS_JITTER_PID=$!
+  sig_resume
+  wait "$GS_JITTER_PID"
+  GS_JITTER_PID=
+}
+
+# PID of a worker's jitter sleep while it runs; empty otherwise.
+GS_JITTER_PID=
+
+# worker_interrupted: TERM handler of a worker.
+worker_interrupted() {
+  [ -z "$GS_JITTER_PID" ] || kill "$GS_JITTER_PID" 2>/dev/null
+  fetch_abort
+  exit 1
 }
 
 # cmd___sync_one JOB RUNFILE REPO: xargs worker for parallel `sync --all`.
+# Only TERM is trapped: workers inherit an ignored INT (xargs runs as an
+# asynchronous list without job control), which a shell cannot trap.
 cmd___sync_one() {
   GS_JOB=$1
-  trap 'fetch_abort; exit 1' INT TERM
+  GS_SIG_HANDLER=worker_interrupted
+  trap 'on_signal' TERM
   jitter_sleep
   sync_one_report "$3" 1 "$2"
 }
@@ -1044,10 +1120,12 @@ cmd_sync() {
   : > "$runfile" || die "cannot write $runfile"
   if [ "$all" = 1 ]; then
     # Parallel: up to sync.jobs workers, each after a random jitter delay.
+    # In the background so that `wait` lets INT/TERM be handled at once.
+    sig_defer
     printf '%s\n' "$entries" | grep . | tr '\n' '\0' |
       xargs -0 -n 1 -P "$(cfg_get sync.jobs)" "$(self_path)" __sync-one "$GS_JOB" "$runfile" &
-    # In the background so that `wait` lets INT/TERM be handled at once.
     GS_XARGS_PID=$!
+    sig_resume
     wait "$GS_XARGS_PID"
     GS_XARGS_PID=
   else

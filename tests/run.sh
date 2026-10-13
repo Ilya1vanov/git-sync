@@ -666,20 +666,26 @@ poll() {
   local n=0
   until eval "$2"; do n=$((n + 1)); [ "$n" -lt "$1" ] || return 1; sleep 0.1; done
 }
-# interrupted_run FETCHES SIG ARGS...: starts `git-sync ARGS` in the background
-# (own process group, like a terminal job; sync.fetchTimeout must be 53), waits
-# until FETCHES hanging fetches are in flight, then sends SIG: INT to the whole
-# group (Ctrl-C), TERM to the run alone. Checks the run ends promptly and
-# leaves no fetch, ssh or sleeper behind, no lock, no temp dir, no job notice.
+# fetches N: true once N hanging fetches (fake ssh processes) are in flight.
+fetches() { [ "$(marked | grep -c .)" -ge "$1" ]; }
+# leftovers: PIDs of live fake ssh, 53s sleepers, jitter sleeps (2 decimals) or workers.
+leftovers() {
+  marked 53; pgrep -fx 'sleep [0-9]+\.[0-9][0-9]'; pgrep -f "__sync-one.*$GIT_SYNC_HOME/run"
+}
+# interrupted_run READY SIG ARGS...: starts `git-sync ARGS` in the background
+# (own process group, like a terminal job; sync.fetchTimeout should be 53),
+# waits until the shell condition READY holds, then sends SIG: INT to the whole
+# group (Ctrl-C), TERM to the run alone. Checks the run ends promptly and leaves
+# no fetch, ssh, sleeper or worker behind, no lock, no temp dir, no job notice.
 interrupted_run() {
-  local want=$1 sig=$2 pid rc; shift 2
+  local ready=$1 sig=$2 pid rc; shift 2
   set -m; gs_ssh "$@" > "$T/int.out" 2>&1 & pid=$!; set +m
-  poll 100 '[ "$(marked | grep -c .)" -ge "$want" ]' || { echo "    fetches never started"; kill -KILL -"$pid"; return 1; }
+  poll 100 "$ready" || { echo "    never ready: $ready"; kill -KILL -"$pid"; return 1; }
   if [ "$sig" = INT ]; then kill -INT -"$pid"; else kill -TERM "$(cat "$GIT_SYNC_HOME/lock/pid")"; fi
   poll 50 '! kill -0 "$pid" 2>/dev/null' || { echo "    run still alive after $sig"; kill -KILL -"$pid"; return 1; }
   wait "$pid" 2>/dev/null; rc=$?
   [ "$rc" -ne 0 ] || { echo "    interrupted run exited 0"; return 1; }
-  poll 30 '[ -z "$(marked 53)" ]' || { echo "    leaked: $(marked 53 | tr '\n' ' ')"; return 1; }
+  poll 30 '[ -z "$(leftovers)" ]' || { echo "    leaked: $(leftovers | tr '\n' ' ')"; kill -KILL $(leftovers) 2>/dev/null; return 1; }
   [ ! -d "$GIT_SYNC_HOME/lock" ] || { echo "    lock left behind"; return 1; }
   assert_eq "$(ls "$GIT_SYNC_HOME" | grep '^fetch\.')" "" &&
   assert_not_contains "$(cat "$T/int.out")" "Terminated" &&
@@ -690,7 +696,7 @@ test_interrupt_inline_run_stops_fetch() {
   gs config --global sync.fetchTimeout 53 &&
   git -C "$WORK" remote set-url origin "ssh://example.invalid/x.git" || return 1
   for sig in TERM INT; do
-    interrupted_run 1 "$sig" sync "$WORK" || { echo "    ($sig)"; return 1; }
+    interrupted_run 'fetches 1' "$sig" sync "$WORK" || { echo "    ($sig)"; return 1; }
   done
   # the lock is free: the next run proceeds
   ssh_stub && out=$(gs_ssh sync "$WORK" 2>&1)
@@ -703,11 +709,57 @@ test_interrupt_parallel_run_stops_fetches() {
   git -C "$WORK" remote set-url origin "ssh://example.invalid/x.git" &&
   git -C "$T/r2" remote set-url origin "ssh://example.invalid/y.git" || return 1
   for sig in TERM INT; do
-    interrupted_run 2 "$sig" sync --all || { echo "    ($sig)"; return 1; }
+    interrupted_run 'fetches 2' "$sig" sync --all || { echo "    ($sig)"; return 1; }
   done
   ssh_stub && out=$(gs_ssh sync --all 2>&1)
   assert_contains "$out" "$WORK: blocked (fetch-failed:origin)" &&
   assert_contains "$out" "$T/r2: blocked (fetch-failed:origin)"
+}
+test_interrupt_kills_fetch_that_ignores_term() {
+  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null && hang_stub ignore-term &&
+  git clone -q "$T/remote.git" "$T/r2" && gs install "$T/r2" >/dev/null &&
+  gs config --global sync.fetchTimeout 53 && gs config --global sync.jobs 2 &&
+  git -C "$WORK" remote set-url origin "ssh://example.invalid/x.git" &&
+  git -C "$T/r2" remote set-url origin "ssh://example.invalid/y.git" || return 1
+  for sig in TERM INT; do
+    interrupted_run 'fetches 1' "$sig" sync "$WORK" || { echo "    (inline $sig)"; return 1; }
+    interrupted_run 'fetches 2' "$sig" sync --all || { echo "    (--all $sig)"; return 1; }
+  done
+}
+test_interrupt_during_timeout_grace_kills_fetch() {
+  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null && hang_stub ignore-term &&
+  gs config --global sync.fetchTimeout 1 &&
+  git -C "$WORK" remote set-url origin "ssh://example.invalid/x.git" || return 1
+  # the timer has fired; the fetch ignores TERM and awaits its KILL
+  interrupted_run 'fetches 1 && ls "$GIT_SYNC_HOME"/fetch.*/timeout >/dev/null 2>&1' TERM sync "$WORK"
+}
+test_interrupt_during_jitter_is_prompt() {
+  # two workers, so that the run is still sleeping even if one draws a tiny delay
+  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null &&
+  git clone -q "$T/remote.git" "$T/r2" && gs install "$T/r2" >/dev/null &&
+  gs config --global sync.jobs 2 && gs config --global sync.jitter 50 &&
+  gs config --global sync.mode maintain-only || return 1
+  for sig in TERM INT; do
+    interrupted_run '[ -n "$(pgrep -fx "sleep [0-9]+\.[0-9][0-9]")" ]' "$sig" sync --all || { echo "    ($sig)"; return 1; }
+  done
+}
+test_interrupt_removes_fetch_dir_of_killed_worker() {
+  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null && hang_stub &&
+  gs config --global sync.fetchTimeout 53 &&
+  git -C "$WORK" remote set-url origin "ssh://example.invalid/x.git" || return 1
+  # fetch.1 stands for the temp dir of a worker of this run that was SIGKILLed
+  interrupted_run 'fetches 1 && mkdir -p "$GIT_SYNC_HOME/fetch.1"' TERM sync --all
+}
+test_fetch_timeout_maintenance_still_runs() {
+  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null && hang_stub &&
+  gs config --global sync.fetchTimeout 1 &&
+  # a negative auto limit makes `maintenance run --auto` always write the commit-graph
+  git -C "$WORK" config maintenance.commit-graph.auto -1 &&
+  git -C "$WORK" remote set-url origin "ssh://example.invalid/x.git" &&
+  assert_no_file "$WORK/.git/objects/info/commit-graphs/commit-graph-chain" || return 1
+  out=$(cd "$WORK" && gs_ssh sync 2>&1)
+  assert_eq "$out" "$WORK: blocked (fetch-timeout:origin)" &&
+  assert_file "$WORK/.git/objects/info/commit-graphs/commit-graph-chain"
 }
 
 ffsetup() { gs init >/dev/null && make_repos "$@" && gs install "$WORK" >/dev/null; }
