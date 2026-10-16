@@ -408,6 +408,7 @@ run_interrupted() {
     fi
     rm -rf "$GS_HOME"/fetch.*
   fi
+  host_state_clear
   exit 1
 }
 
@@ -492,7 +493,7 @@ fetch_bounded() {
   rm -f "$d/timeout"
   sig_defer
   set -m
-  git -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=60 -C "$repo" fetch --prune --quiet "$r" >/dev/null 2>"$d/err" &
+  LC_ALL=C git -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=60 -C "$repo" fetch --prune --quiet "$r" >/dev/null 2>"$d/err" &
   GS_FETCH_PGID=$!
   (
     sleep "$secs"
@@ -523,8 +524,58 @@ fetch_abort() {
   rm -rf "$GS_HOME/fetch.$$"
 }
 
+# Unreachable hosts. Per-run shared state: one marker dir $GS_HOME/host.<sha1(host) first 16 hex>
+# per unreachable host, holding `name` (the host) and `skips` (one
+# "<repo>\t<remote>" line per host skip). The lock-owning run removes them at
+# run start (leftovers of a killed run), at run end and on interrupt.
+
+# remote_host REPO REMOTE: prints the host of REMOTE's URL; rc 1 if it has none
+# (never grouped). Parses ssh:// and scp-style [user@]host:path URLs.
+remote_host() {
+  local url h
+  url=$(git -C "$1" ls-remote --get-url "$2" 2>/dev/null) || return 1
+  case "$url" in
+    ssh://*) h=${url#ssh://}; h=${h%%/*}; h=${h##*@} ;;
+    *::*|*://*|/*|./*|../*) return 1 ;;
+    *:*)
+      h=${url%%:*}
+      case "$h" in */*) return 1 ;; esac
+      h=${h##*@} ;;
+    *) return 1 ;;
+  esac
+  [ -n "$h" ] || return 1
+  printf '%s\n' "$h"
+}
+
+host_marker() {
+  printf '%s/host.%s\n' "$GS_HOME" "$(printf %s "$1" | shasum -a 1 | cut -c1-16)"
+}
+
+host_unreachable() { [ -d "$(host_marker "$1")" ]; }
+
+# host_mark_unreachable HOST: creates HOST's marker atomically; rc 1 if it existed.
+host_mark_unreachable() {
+  local m; m=$(host_marker "$1")
+  mkdir "$m" 2>/dev/null || return 1
+  printf '%s\n' "$1" > "$m/name"
+}
+
+# host_skip HOST REMOTE: record a host skip of REMOTE in the current repo.
+host_skip() {
+  add_note "$2: skipped (host $1 unreachable)"
+  printf '%s\t%s\n' "$SYNC_REPO" "$2" >> "$(host_marker "$1")/skips"
+  log_msg INFO "$SYNC_REPO: $2 skipped (host $1 unreachable)"
+}
+
+# is_connection_error FILE: rc 0 if fetch stderr FILE (C locale) shows a connection-class failure.
+is_connection_error() {
+  grep -qiE 'could not resolve host|connection refused|connection timed out|operation timed out|network is unreachable|no route to host|failed to connect' "$1" 2>/dev/null
+}
+
+host_state_clear() { rm -rf "$GS_HOME"/host.*; }
+
 sync_fetch() {
-  local repo=$1 remotes r err limit secs d
+  local repo=$1 remotes r err limit secs d host
   remotes=$(git -C "$repo" remote 2>/dev/null)
   [ -n "$remotes" ] || return 0
   limit=$(cfg_get sync.fetchTimeout "$repo")
@@ -533,14 +584,22 @@ sync_fetch() {
   mkdir -p "$d"
   while IFS= read -r r; do
     [ -n "$r" ] || continue
-    if fetch_bounded "$repo" "$r" "$secs" "$d"; then
-      [ -e "$d/timeout" ] || continue
-    fi
-    if [ -e "$d/timeout" ]; then
-      add_blocker "fetch-timeout:$r" "timed out after $limit"
+    host=$(remote_host "$repo" "$r") || host=
+    if [ -n "$host" ] && host_unreachable "$host"; then
+      host_skip "$host" "$r"
     else
-      err=$(cat "$d/err" 2>/dev/null)
-      add_blocker "fetch-failed:$r" "$(first_line "$err")"
+      if fetch_bounded "$repo" "$r" "$secs" "$d"; then
+        [ -e "$d/timeout" ] || continue
+      fi
+      if [ -e "$d/timeout" ]; then
+        add_blocker "fetch-timeout:$r" "timed out after $limit"
+      else
+        err=$(cat "$d/err" 2>/dev/null)
+        add_blocker "fetch-failed:$r" "$(first_line "$err")"
+        if [ -n "$host" ] && is_connection_error "$d/err"; then
+          host_mark_unreachable "$host"
+        fi
+      fi
     fi
     SYNC_FAILED_REMOTES="${SYNC_FAILED_REMOTES:+$SYNC_FAILED_REMOTES }$r"
   done <<EOF
@@ -1282,6 +1341,7 @@ cmd_sync() {
   fi
   # The lock guarantees no other run; leftovers are from a killed run.
   rm -f "$GS_HOME"/run.*
+  host_state_clear
   runfile="$GS_HOME/run.$$"
   : > "$runfile" || die "cannot write $runfile"
   if [ "$all" = 1 ]; then
@@ -1310,6 +1370,7 @@ cmd_sync() {
 $(sort -t "$(printf '\t')" -k3 "$runfile")
 EOF
   rm -f "$runfile"
+  host_state_clear
   # A worker that died without reporting counts as failed.
   if [ $((ok + blocked + failed)) -lt "$n" ]; then
     log_msg ERROR "$((n - ok - blocked - failed)) repo(s) did not report a result"

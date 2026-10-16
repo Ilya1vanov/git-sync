@@ -42,3 +42,11 @@ _Avoid_: skipped run, offline run
 
 **Offline streak**:
 The consecutive offline skips since the last run that actually synced.
+
+**Unreachable host**:
+A host that failed a connection-class fetch earlier in the same run. Nothing about it is remembered after the run.
+_Avoid_: circuit breaker, backoff, dead host
+
+**Host skip**:
+A remote that was not fetched because its host is unreachable. It is a note on the repo, not a blocker, and is distinct from an offline skip, which covers a whole run.
+_Avoid_: circuit breaker, backoff

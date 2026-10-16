@@ -212,6 +212,25 @@ also fail instead of hanging: ssh gets `ConnectTimeout=30` and
 1000 B/s for 60s. A repo's own `core.sshCommand` or a caller-set
 `GIT_SSH_COMMAND` is respected (and then these ssh options are not added).
 
+### Host skips
+
+When a fetch fails with a connection error, its host is treated as
+unreachable for the rest of the run. That remote keeps its
+`fetch-failed:<remote>` blocker. Every later remote on the same host, in any
+repo of the run, is not fetched: it gets the note
+`<remote>: skipped (host <host> unreachable)` and no blocker, so a repo whose
+only problem is host skips is `ok`. As with a failed fetch, branches tracking a
+skipped remote are not fast-forwarded and its `origin/HEAD` is not auto-set.
+Nothing is remembered between runs: the next run tries the host again.
+
+A connection error is git's stderr (C locale) matching one of: could not
+resolve host(name), connection refused, connection timed out, operation timed
+out, network is unreachable, no route to host, failed to connect. Other
+failures, such as `Permission denied (publickey)`, and fetch timeouts leave the
+host alone. The host is taken from `ssh://[user@]host[:port]/…` and scp-style
+`[user@]host:path` URLs (after `insteadOf` rewriting); other URLs are never
+grouped. ssh aliases are not resolved, so each alias is its own host.
+
 ## Maintenance
 
 After each sync, in every mode, git-sync runs
