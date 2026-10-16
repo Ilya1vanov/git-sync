@@ -605,9 +605,12 @@ sync_fetch() {
         add_blocker "fetch-timeout:$r" "timed out after $limit"
       else
         err=$(cat "$d/err" 2>/dev/null)
-        add_blocker "fetch-failed:$r" "$(first_line "$err")"
-        if [ -n "$host" ] && is_connection_error "$d/err"; then
-          host_mark_unreachable "$host"
+        # only the worker that creates the host's marker keeps the blocker; a
+        # connection failure that loses that race becomes a host skip
+        if [ -n "$host" ] && is_connection_error "$d/err" && ! host_mark_unreachable "$host"; then
+          host_skip "$host" "$r"
+        else
+          add_blocker "fetch-failed:$r" "$(first_line "$err")"
         fi
       fi
     fi
