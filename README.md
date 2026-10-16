@@ -194,16 +194,17 @@ Result per repo: `ok`, `blocked` (at least one blocker), `error`, `missing`
 | `<branch>:in-progress` | Merge, rebase, cherry-pick, revert or bisect in that worktree (`ffCheckedOut=true`). |
 | `<branch>:diverged` | Local branch is both ahead of and behind its upstream, so it cannot fast-forward. (Ahead only is a note, not a blocker.) |
 | `<branch>:ff-failed` | Git refused the fast-forward (for example mid-rebase, an untracked file in the way, `index.lock`). |
-| `fetch-failed:<remote>` | `git fetch` failed for that remote. Branches tracking it are skipped. |
+| `fetch-failed:<remote>` | `git fetch` failed for that remote. Branches tracking it are skipped. On a connection error, later remotes on the same host get a [host skip](#host-skips) note instead. |
 | `fetch-timeout:<remote>` | A fetch from that remote ran longer than `sync.fetchTimeout` and was stopped. Branches tracking it are skipped. |
 | `maintenance:failed` | `git maintenance run` failed. |
 | `repo:invalid` | The path exists but is not a git repository (result `error`). |
 
 Checked-out branches that could fast-forward with `ffCheckedOut=false`, and
-branches that are only ahead of their upstream, are reported as notes
-(`main: skipped (checked out)`, `develop: ahead 1 (not pushed)`), not
-blockers. Blockers clear on their own the
-next time the condition is gone.
+branches that are only ahead of their upstream, and remotes not fetched
+because their host is unreachable ([host skips](#host-skips)), are reported as
+notes (`main: skipped (checked out)`, `develop: ahead 1 (not pushed)`,
+`origin: skipped (host github.com unreachable)`), not blockers. Blockers clear
+on their own the next time the condition is gone.
 
 Fetches run non-interactively (`GIT_TERMINAL_PROMPT=0`, ssh `BatchMode=yes`),
 so credential prompts fail the fetch instead of hanging. Stalled transfers
@@ -211,6 +212,47 @@ also fail instead of hanging: ssh gets `ConnectTimeout=30` and
 `ServerAliveInterval=15`/`ServerAliveCountMax=3`, and http fetches abort below
 1000 B/s for 60s. A repo's own `core.sshCommand` or a caller-set
 `GIT_SSH_COMMAND` is respected (and then these ssh options are not added).
+
+### Host skips
+
+When a fetch fails with a connection error, its host is treated as
+unreachable for the rest of the run. That remote keeps its
+`fetch-failed:<remote>` blocker. Every later remote on the same host, in any
+repo of the run, is not fetched: it gets the note
+`<remote>: skipped (host <host> unreachable)` and no blocker, so a repo whose
+only problem is host skips is `ok`. As with a failed fetch, branches tracking a
+skipped remote are not fast-forwarded and its `origin/HEAD` is not auto-set.
+Nothing is remembered between runs: the next run tries the host again.
+
+A connection error is git's stderr (C locale) matching one of: could not
+resolve host(name), connection refused, connection timed out, operation timed
+out, network is unreachable, no route to host, failed to connect. Lines the
+server sent (`remote: ...`) are not checked, since that host was reached. Other
+failures, such as `Permission denied (publickey)`, and fetch timeouts leave the
+host alone.
+
+The host comes from the remote's URL as git expands it (as
+`git ls-remote --get-url` shows it), so `url.<base>.insteadOf` rewrites apply.
+It is read from `ssh://`, `git://`, `http://` and `https://` URLs and from
+scp-style `[user@]host:path`, including IPv6 addresses in brackets (`[::1]`);
+scp-style `[host:22]:path` is the same host as `ssh://host:22/path`.
+The host is compared lowercased, and the port is part of it only when the URL
+states one: `github.com` and `GitHub.com` are one host, `host` and `host:2222`
+are two. ssh aliases are not resolved, so each alias is its own host. Local
+paths, `file://` URLs, `<transport>::` helper URLs and anything else have no
+host: they are never grouped and are fetched as usual.
+
+At the end of the run, each unreachable host with at least one host skip is
+reported once: a manual run prints, after the per-repo lines,
+
+```
+github.com: unreachable, 1 remote skipped
+gitlab.corp: unreachable, 3 remotes skipped
+```
+
+the log gets the same text as a WARN line, and a job run's `finished`
+notification appends `; <host> unreachable (N skipped)` per host. A host whose
+only failure is the one blocker (no skips) is not reported.
 
 ## Maintenance
 
@@ -242,6 +284,7 @@ blocked  5 minutes ago  ~/projects/api
                         blocked by: develop:dirty, fetch-failed:upstream
 missing  2 days ago     ~/projects/old
 ok       < 1m ago       ~/projects/app
+                        note: origin: skipped (host github.com unreachable)
 ok       5 minutes ago  ~/projects/web
                         note: main: skipped (checked out)
 pending  never          ~/projects/new
@@ -283,10 +326,15 @@ git-sync notifications            # show current state
 ```
 
 Events: `finished` (counts of ok/blocked/failed), `blocked` (a repo gained a
-blocker it did not have in its previous run). A run sends at most one
+blocker it did not have in its previous run). For this, a host skip of
+`<remote>` in the previous run counts as `fetch-failed:<remote>`: during an
+outage spanning several runs, whichever repo hits the unreachable host first
+takes the blocker, and that move alone does not notify again. A run sends at most one
 notification, at its end, combining both: e.g. title
 `git-sync: 2 repos newly blocked`, message
 `api: develop:dirty; web: fetch-failed:origin — 40 repos: 38 ok, 2 blocked, 0 failed`.
+With `finished`, each unreachable host that caused [host skips](#host-skips) is
+appended to the counts: `40 repos: 38 ok, 2 blocked, 0 failed; github.com unreachable (5 skipped)`.
 A legacy `start` in `notify.events` is ignored.
 
 Delivery uses `osascript`, so notifications appear as coming from "Script

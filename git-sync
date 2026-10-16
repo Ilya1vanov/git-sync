@@ -408,7 +408,86 @@ run_interrupted() {
     fi
     rm -rf "$GS_HOME"/fetch.*
   fi
+  host_state_clear
   exit 1
+}
+
+# ---- hosts ----
+# Unreachable hosts. Per-run shared state: one marker dir
+# $GS_HOME/host.<sha1(host) first 16 hex> per unreachable host, holding `name`
+# (the host) and `skips` (one "<repo>\t<remote>" line per host skip). The
+# lock-owning run removes them at run start (leftovers of a killed run), at run
+# end and on interrupt.
+
+# remote_host REPO REMOTE: prints the host of REMOTE's URL as git expands it
+# (insteadOf applies), lowercased, with the port only when the URL states one;
+# rc 1 if it has none (never grouped). Parses ssh://, git://, http(s):// and
+# scp-style [user@]host:path URLs, IPv6 in brackets. ssh aliases are kept as-is.
+remote_host() {
+  local url h
+  url=$(git -C "$1" ls-remote --get-url "$2" 2>/dev/null) || return 1
+  h=${url%%::*}
+  if [ "$h" != "$url" ]; then
+    case "$h" in ''|*[!A-Za-z0-9+.-]*) ;; *) return 1 ;; esac   # <transport>::address
+  fi
+  case "$url" in
+    ssh://*|git://*|http://*|https://*)
+      h=${url#*://}; h=${h%%/*}; h=${h##*@} ;;
+    *://*|/*|./*|../*) return 1 ;;
+    *:*)
+      h=$url
+      case "${h%%@*}" in *:*|*/*) ;; *) h=${h#*@} ;; esac
+      case "$h" in
+        \[*\]:*) h="${h%%]:*}]" ;;
+        *) h=${h%%:*}; case "$h" in */*) return 1 ;; esac ;;
+      esac
+      # [host:port] -> host:port, as ssh:// gives it; IPv6 ([::1]) keeps brackets
+      case "$h" in \[*:*:*\]) ;; \[*:*\]) h=${h#\[}; h=${h%\]} ;; esac ;;
+    *) return 1 ;;
+  esac
+  case "$h" in ''|:*|\[\]*) return 1 ;; esac
+  printf '%s\n' "$h" | tr '[:upper:]' '[:lower:]'
+}
+
+host_marker() {
+  printf '%s/host.%s\n' "$GS_HOME" "$(printf %s "$1" | shasum -a 1 | cut -c1-16)"
+}
+
+host_unreachable() { [ -d "$(host_marker "$1")" ]; }
+
+# host_mark_unreachable HOST: creates HOST's marker atomically; rc 1 if it existed.
+host_mark_unreachable() {
+  local m; m=$(host_marker "$1")
+  mkdir "$m" 2>/dev/null || return 1
+  printf '%s\n' "$1" > "$m/name"
+}
+
+# host_skip HOST REMOTE: record a host skip of REMOTE in the current repo.
+# prev_blocker_keys parses this note's format back; change both together.
+host_skip() {
+  add_note "$2: skipped (host $1 unreachable)"
+  printf '%s\t%s\n' "$SYNC_REPO" "$2" >> "$(host_marker "$1")/skips"
+  log_msg INFO "$SYNC_REPO: $2 skipped (host $1 unreachable)"
+}
+
+# is_connection_error FILE: rc 0 if fetch stderr FILE (C locale) shows a
+# connection-class failure. Server `remote:` lines are ignored: a host that
+# sends them was reached.
+is_connection_error() {
+  grep -v '^remote:' "$1" 2>/dev/null |
+    grep -qiE 'could not resolve host|connection refused|connection timed out|operation timed out|network is unreachable|no route to host|failed to connect'
+}
+
+host_state_clear() { rm -rf "$GS_HOME"/host.*; }
+
+# host_report: "<host>\t<skips>" per unreachable host with at least one host skip,
+# sorted by host. Read by the parent before host_state_clear.
+host_report() {
+  local m
+  for m in "$GS_HOME"/host.*; do
+    [ -s "$m/skips" ] || continue
+    printf '%s\t%s\n' "$(cat "$m/name")" "$(grep -c . "$m/skips")"
+  done | sort
 }
 
 # ---- sync engine ----
@@ -492,7 +571,7 @@ fetch_bounded() {
   rm -f "$d/timeout"
   sig_defer
   set -m
-  git -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=60 -C "$repo" fetch --prune --quiet "$r" >/dev/null 2>"$d/err" &
+  LC_ALL=C git -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=60 -C "$repo" fetch --prune --quiet "$r" >/dev/null 2>"$d/err" &
   GS_FETCH_PGID=$!
   (
     sleep "$secs"
@@ -524,7 +603,7 @@ fetch_abort() {
 }
 
 sync_fetch() {
-  local repo=$1 remotes r err limit secs d
+  local repo=$1 remotes r err limit secs d host
   remotes=$(git -C "$repo" remote 2>/dev/null)
   [ -n "$remotes" ] || return 0
   limit=$(cfg_get sync.fetchTimeout "$repo")
@@ -533,14 +612,25 @@ sync_fetch() {
   mkdir -p "$d"
   while IFS= read -r r; do
     [ -n "$r" ] || continue
-    if fetch_bounded "$repo" "$r" "$secs" "$d"; then
-      [ -e "$d/timeout" ] || continue
-    fi
-    if [ -e "$d/timeout" ]; then
-      add_blocker "fetch-timeout:$r" "timed out after $limit"
+    host=$(remote_host "$repo" "$r") || host=
+    if [ -n "$host" ] && host_unreachable "$host"; then
+      host_skip "$host" "$r"
     else
-      err=$(cat "$d/err" 2>/dev/null)
-      add_blocker "fetch-failed:$r" "$(first_line "$err")"
+      if fetch_bounded "$repo" "$r" "$secs" "$d"; then
+        [ -e "$d/timeout" ] || continue
+      fi
+      if [ -e "$d/timeout" ]; then
+        add_blocker "fetch-timeout:$r" "timed out after $limit"
+      else
+        err=$(cat "$d/err" 2>/dev/null)
+        # only the worker that creates the host's marker keeps the blocker; a
+        # connection failure that loses that race becomes a host skip
+        if [ -n "$host" ] && is_connection_error "$d/err" && ! host_mark_unreachable "$host"; then
+          host_skip "$host" "$r"
+        else
+          add_blocker "fetch-failed:$r" "$(first_line "$err")"
+        fi
+      fi
     fi
     SYNC_FAILED_REMOTES="${SYNC_FAILED_REMOTES:+$SYNC_FAILED_REMOTES }$r"
   done <<EOF
@@ -770,7 +860,7 @@ sync_repo() {
     fi
   fi
   if [ "$listed" = 1 ]; then
-    SYNC_PREV_KEYS=$(git config -f "$(status_file "$repo")" --get-all status.blocker 2>/dev/null | awk '{print $1}')
+    SYNC_PREV_KEYS=$(prev_blocker_keys "$(status_file "$repo")")
     status_write "$repo" "$mode"
   fi
   log_msg INFO "$repo: $SYNC_RESULT"
@@ -908,6 +998,17 @@ notify_wanted() {
 # collects; notify_run_end sends.
 NOTIFY_NEW_BLOCKED=   # "; "-separated "<repo>: <key>, <key>"
 NOTIFY_NEW_COUNT=0
+NOTIFY_HOSTS=        # "; <host> unreachable (N skipped)" per reported host
+
+# prev_blocker_keys STATUS_FILE: the blocker keys of a repo's previous run, one
+# per line. A host skip of <remote> counts as fetch-failed:<remote>, so an outage
+# whose blocker moves to another repo between runs is not "newly blocked".
+# The sed matches the note written by host_skip; change both together.
+prev_blocker_keys() {
+  git config -f "$1" --get-all status.blocker 2>/dev/null | awk '{print $1}'
+  git config -f "$1" --get-all status.note 2>/dev/null |
+    sed -n 's/^\(.*\): skipped (host .* unreachable)$/fetch-failed:\1/p'
+}
 
 # new_blocker_keys: comma-separated blocker keys of the repo just synced that
 # were not in its previous status file (SYNC_PREV_KEYS); empty if none.
@@ -934,7 +1035,7 @@ notify_collect() {
 notify_run_end() {
   local title msg summary=
   if notify_wanted finished; then
-    summary="$(( $1 + $2 + $3 )) repos: $1 ok, $2 blocked, $3 failed"
+    summary="$(( $1 + $2 + $3 )) repos: $1 ok, $2 blocked, $3 failed$NOTIFY_HOSTS"
   fi
   if [ "$NOTIFY_NEW_COUNT" -eq 1 ]; then
     title="git-sync: $NOTIFY_LAST_REPO" msg=$NOTIFY_LAST_KEYS
@@ -1228,7 +1329,7 @@ list_repo_lines() {
 }
 
 cmd_sync() {
-  local all=0 repo n=0 ok=0 blocked=0 failed=0 rc=0 keys line entries listed path= runfile result
+  local all=0 repo n=0 ok=0 blocked=0 failed=0 rc=0 keys line entries listed path= runfile result hosts host count noun report
   while [ $# -gt 0 ]; do
     case "$1" in
       --all) all=1 ;;
@@ -1282,6 +1383,7 @@ cmd_sync() {
   fi
   # The lock guarantees no other run; leftovers are from a killed run.
   rm -f "$GS_HOME"/run.*
+  host_state_clear
   runfile="$GS_HOME/run.$$"
   : > "$runfile" || die "cannot write $runfile"
   if [ "$all" = 1 ]; then
@@ -1309,7 +1411,20 @@ cmd_sync() {
   done <<EOF
 $(sort -t "$(printf '\t')" -k3 "$runfile")
 EOF
+  hosts=$(host_report)
   rm -f "$runfile"
+  host_state_clear
+  # One report per unreachable host that caused host skips.
+  while IFS="$(printf '\t')" read -r host count; do
+    [ -n "$host" ] || continue
+    if [ "$count" = 1 ]; then noun=remote; else noun=remotes; fi
+    report="$host: unreachable, $count $noun skipped"
+    log_msg WARN "$report"
+    [ "$GS_JOB" = 1 ] || echo "$report"
+    NOTIFY_HOSTS="$NOTIFY_HOSTS; $host unreachable ($count skipped)"
+  done <<EOF
+$hosts
+EOF
   # A worker that died without reporting counts as failed.
   if [ $((ok + blocked + failed)) -lt "$n" ]; then
     log_msg ERROR "$((n - ok - blocked - failed)) repo(s) did not report a result"
