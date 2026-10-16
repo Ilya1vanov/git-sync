@@ -75,10 +75,16 @@ push_commit() {
   ( cd "$T/pusher" && git checkout -q "$1" && git commit -q --allow-empty -m "${2:-c}" && git push -q origin "$1" ) || exit 1
 }
 
-# After `init`, sync.jitter is set to 0 so parallel test runs don't sleep.
+# When a command creates the config, sync.jitter is set to 0 (unless that
+# command set it) so parallel test runs don't sleep.
 gs() {
+  local had=0
+  [ -f "$GIT_SYNC_HOME/config" ] && had=1
   "$GS" "$@" || return
-  if [ "${1:-}" = init ]; then git config -f "$GIT_SYNC_HOME/config" sync.jitter 0; fi
+  if [ "$had" = 0 ] && [ -f "$GIT_SYNC_HOME/config" ] &&
+     ! git config -f "$GIT_SYNC_HOME/config" sync.jitter >/dev/null; then
+    git config -f "$GIT_SYNC_HOME/config" sync.jitter 0
+  fi
 }
 # quiet CMD...: run, discard output, always succeed (for steps whose exit code is not under test).
 quiet() { "$@" >/dev/null 2>&1; return 0; }
@@ -149,34 +155,65 @@ test_unknown_command_exit2() {
   gs bogus >/dev/null 2>"$T/err"; rc=$?
   assert_eq "$rc" 2 && assert_contains "$(cat "$T/err")" "git-sync: unknown command: bogus"
 }
-test_requires_init() {
-  gs list >/dev/null 2>"$T/err"; rc=$?
-  assert_eq "$rc" 1 && assert_contains "$(cat "$T/err")" "not initialized; run 'git-sync init'"
-}
-test_init_creates_defaults() {
-  gs init >/dev/null &&
-  assert_file "$GIT_SYNC_HOME/config" && [ -d "$GIT_SYNC_HOME/status" ] &&
-  assert_eq "$(git config -f "$GIT_SYNC_HOME/config" sync.period)" 20m &&
-  assert_eq "$(git config -f "$GIT_SYNC_HOME/config" sync.mode)" fast-forward &&
-  assert_eq "$(git config -f "$GIT_SYNC_HOME/config" sync.ffCheckedOut)" false &&
-  assert_eq "$(git config -f "$GIT_SYNC_HOME/config" log.maxSize)" 3M &&
-  assert_eq "$(git config -f "$GIT_SYNC_HOME/config" notify.enabled)" false &&
-  assert_eq "$(git config -f "$GIT_SYNC_HOME/config" notify.events)" blocked &&
-  ! git config -f "$GIT_SYNC_HOME/config" sync.branches >/dev/null &&
-  ! git config -f "$GIT_SYNC_HOME/config" sync.repo >/dev/null
-}
-test_init_idempotent_no_overwrite() {
-  gs init >/dev/null && git config -f "$GIT_SYNC_HOME/config" sync.period 5m &&
-  out=$(gs init) && assert_contains "$out" "already initialized" &&
-  assert_eq "$(git config -f "$GIT_SYNC_HOME/config" sync.period)" 5m
-}
-test_init_home_private() {
-  gs init >/dev/null && assert_eq "$(stat -f %Lp "$GIT_SYNC_HOME")" 700 &&
-  chmod 755 "$GIT_SYNC_HOME" && gs init >/dev/null &&
+test_install_creates_home_private() {
+  make_repos && gs install "$WORK" >/dev/null &&
+  assert_eq "$(git config -f "$GIT_SYNC_HOME/config" --get-all sync.repo)" "$WORK" &&
+  [ -d "$GIT_SYNC_HOME/status" ] && assert_eq "$(stat -f %Lp "$GIT_SYNC_HOME")" 700 &&
+  ! git config -f "$GIT_SYNC_HOME/config" sync.period >/dev/null &&
+  chmod 755 "$GIT_SYNC_HOME" && gs sync "$WORK" >/dev/null &&
   assert_eq "$(stat -f %Lp "$GIT_SYNC_HOME")" 700
 }
-test_init_prints_next_steps() {
-  out=$(gs init) && assert_contains "$out" "git-sync install" && assert_contains "$out" "git-sync start"
+# A home that cannot be made private (foreign owner, no POSIX modes) is warned
+# about, once per run, but does not stop git-sync.
+test_home_chmod_failure_warns_once() {
+  mkdir -p "$T/failbin" && printf '#!/bin/sh\nexit 1\n' > "$T/failbin/chmod" && chmod +x "$T/failbin/chmod" &&
+  make_repos && git clone -q "$T/remote.git" "$T/second" &&
+  PATH="$T/failbin:$PATH" gs install "$WORK" >/dev/null 2>"$T/err" &&
+  assert_contains "$(cat "$T/err")" "warning: cannot set permissions of $GIT_SYNC_HOME" &&
+  PATH="$T/failbin:$PATH" gs install "$T/second" >/dev/null 2>&1 &&
+  PATH="$T/failbin:$PATH" gs sync --all >/dev/null 2>"$T/err" &&
+  assert_eq "$(grep -c "cannot set permissions" "$T/err")" 1
+}
+test_start_creates_home_private() {
+  gs start >/dev/null && assert_file "$GIT_SYNC_AGENTS_DIR/com.git-sync.agent.plist" &&
+  assert_eq "$(stat -f %Lp "$GIT_SYNC_HOME")" 700
+}
+test_sync_creates_home_private() {
+  make_repos && gs sync "$WORK" >/dev/null 2>&1 &&
+  [ -d "$GIT_SYNC_HOME/status" ] && assert_eq "$(stat -f %Lp "$GIT_SYNC_HOME")" 700
+}
+test_read_commands_on_fresh_home_create_nothing() {
+  assert_eq "$(gs list)" "No repos." &&
+  assert_contains "$(gs status)" "No repos." &&
+  assert_eq "$(gs config sync.period)" 20m &&
+  assert_contains "$(gs config)" "sync.period = 20m (default)" &&
+  assert_contains "$(gs notifications)" "disabled" &&
+  assert_no_file "$GIT_SYNC_HOME"
+}
+test_uninstall_stop_on_fresh_home_create_nothing() {
+  make_repos &&
+  { gs uninstall "$WORK" >/dev/null 2>&1; [ $? -ne 0 ]; } &&
+  quiet gs stop && assert_no_file "$GIT_SYNC_HOME"
+}
+test_init_is_unknown_command() {
+  gs init >/dev/null 2>"$T/err"; rc=$?
+  assert_eq "$rc" 2 && assert_contains "$(cat "$T/err")" "unknown command: init" &&
+  assert_no_file "$GIT_SYNC_HOME"
+}
+test_config_set_on_fresh_home() {
+  gs config --global --unset sync.period && assert_no_file "$GIT_SYNC_HOME" &&
+  gs config --global sync.period 30m && assert_eq "$(gs config sync.period)" 30m &&
+  assert_eq "$(stat -f %Lp "$GIT_SYNC_HOME")" 700
+}
+test_notifications_write_failure_is_error() {
+  gs config --global sync.period 30m && touch "$GIT_SYNC_HOME/config.lock" &&
+  gs notifications enable >"$T/out" 2>"$T/err"; rc=$?
+  assert_eq "$rc" 1 && assert_contains "$(cat "$T/err")" "cannot write notify.enabled" &&
+  assert_eq "$(cat "$T/out")" ""
+}
+test_notifications_enable_on_fresh_home() {
+  assert_contains "$(gs notifications enable)" "enabled" &&
+  assert_eq "$(stat -f %Lp "$GIT_SYNC_HOME")" 700
 }
 test_install_sh_copies() {
   PREFIX="$T/bin2" sh "$ROOT/install.sh" >/dev/null && [ -x "$T/bin2/git-sync" ] &&
@@ -185,13 +222,11 @@ test_install_sh_copies() {
 }
 
 test_config_get_defaults() {
-  gs init >/dev/null &&
   assert_eq "$(gs config sync.period)" 20m &&
   assert_eq "$(gs config sync.mode)" fast-forward &&
   assert_eq "$(gs config sync.branches)" ""
 }
 test_config_set_global_and_validate() {
-  gs init >/dev/null &&
   gs config --global sync.period 30m && assert_eq "$(gs config sync.period)" 30m &&
   { gs config --global sync.period abc 2>"$T/err"; [ $? -ne 0 ]; } &&
   { gs config --global sync.period 30s 2>/dev/null; [ $? -ne 0 ]; } &&
@@ -206,7 +241,6 @@ test_config_set_global_and_validate() {
   assert_eq "$(gs config sync.period)" 90
 }
 test_config_fetch_timeout_default_and_valid_values() {
-  gs init >/dev/null &&
   assert_eq "$(gs config sync.fetchTimeout)" 5m &&
   assert_contains "$(gs config)" "sync.fetchTimeout = 5m (default)" &&
   for v in 30s 5m 1h 90 3600s 60m; do
@@ -215,7 +249,6 @@ test_config_fetch_timeout_default_and_valid_values() {
 }
 test_config_fetch_timeout_rejects_invalid() {
   unset GIT_SYNC_FETCH_TIMEOUT_MIN
-  gs init >/dev/null &&
   for v in 29s 29 3601 61m 2h abc 0 5x 1.5m ""; do
     { gs config --global sync.fetchTimeout "$v" 2>"$T/err"; [ $? -ne 0 ]; } &&
     assert_contains "$(cat "$T/err")" "sync.fetchTimeout must" || { echo "    accepted [$v]"; return 1; }
@@ -223,14 +256,13 @@ test_config_fetch_timeout_rejects_invalid() {
   assert_contains "$(gs config)" "sync.fetchTimeout = 5m (default)"
 }
 test_config_fetch_timeout_min_test_hook() {
-  gs init >/dev/null &&
   gs config --global sync.fetchTimeout 2s && assert_eq "$(gs config sync.fetchTimeout)" 2s &&
   { GIT_SYNC_FETCH_TIMEOUT_MIN=10 gs config --global sync.fetchTimeout 9 2>"$T/err"; [ $? -ne 0 ]; } &&
   GIT_SYNC_FETCH_TIMEOUT_MIN=10 gs config --global sync.fetchTimeout 10 &&
   { gs config --global sync.fetchTimeout 3601 2>/dev/null; [ $? -ne 0 ]; }
 }
 test_config_fetch_timeout_repo_override() {
-  gs init >/dev/null && make_repos && gs config --global sync.fetchTimeout 2m &&
+  make_repos && gs config --global sync.fetchTimeout 2m &&
   cd "$WORK" &&
   assert_contains "$(gs config)" "sync.fetchTimeout = 2m (global)" &&
   gs config sync.fetchTimeout 20m &&
@@ -245,7 +277,7 @@ test_config_fetch_timeout_repo_override() {
 # would run a $(...) inside an array subscript.
 test_config_invalid_stored_value_ignored() {
   local evil
-  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null &&
+  make_repos && gs install "$WORK" >/dev/null &&
   evil='HOME[$(touch "$STUB_DIR/pwned")]'
   git -C "$WORK" config git-sync.fetchTimeout "${evil}m" &&
   git config -f "$GIT_SYNC_HOME/config" log.maxSize "${evil}M" &&
@@ -267,7 +299,7 @@ test_config_invalid_stored_value_ignored() {
   assert_eq "$(gs config sync.jobs 2>/dev/null)" 8
 }
 test_config_repo_override_and_unset() {
-  gs init >/dev/null && make_repos && cd "$WORK" &&
+  make_repos && cd "$WORK" &&
   gs config sync.mode maintain-only &&
   assert_eq "$(git config git-sync.mode)" maintain-only &&
   assert_eq "$(gs config sync.mode)" maintain-only &&
@@ -276,33 +308,31 @@ test_config_repo_override_and_unset() {
   gs config --unset sync.mode
 }
 test_config_global_only_key_in_repo_is_usage_error() {
-  gs init >/dev/null && make_repos && cd "$WORK" &&
+  make_repos && cd "$WORK" &&
   { gs config sync.period 30m 2>"$T/err"; assert_eq $? 2; } &&
   assert_contains "$(cat "$T/err")" "global-only"
 }
 test_config_outside_repo_without_global() {
-  gs init >/dev/null && mkdir "$T/plain" && cd "$T/plain" &&
+  mkdir "$T/plain" && cd "$T/plain" &&
   { gs config sync.mode maintain-only 2>/dev/null; assert_eq $? 2; }
 }
 test_config_unknown_key() {
-  gs init >/dev/null &&
   { gs config --global foo.bar 1 2>/dev/null; assert_eq $? 2; } &&
   gs config --global --force foo.bar 1 &&
   assert_eq "$(git config -f "$GIT_SYNC_HOME/config" foo.bar)" 1
 }
 test_config_sync_repo_forbidden() {
-  gs init >/dev/null &&
   { gs config --global sync.repo /x 2>"$T/err"; assert_eq $? 2; } &&
   assert_contains "$(cat "$T/err")" "install/uninstall"
 }
 test_config_list_shows_sources() {
-  gs init >/dev/null && gs config --global sync.period 45m &&
+  gs config --global sync.period 45m &&
   out=$(gs config) && assert_contains "$out" "sync.period = 45m (global)" &&
-  assert_contains "$out" "sync.mode = fast-forward (global)" &&
+  assert_contains "$out" "sync.mode = fast-forward (default)" &&
   assert_not_contains "$out" "sync.repo"
 }
 test_config_disable_offline_check() {
-  gs init >/dev/null && make_repos &&
+  make_repos &&
   assert_eq "$(gs config sync.disableOfflineCheck)" false &&
   assert_contains "$(gs config)" "sync.disableOfflineCheck = false (default)" &&
   { gs config --global sync.disableOfflineCheck maybe 2>"$T/err"; [ $? -ne 0 ]; } &&
@@ -316,45 +346,45 @@ test_config_disable_offline_check() {
 }
 
 test_install_current_repo() {
-  gs init >/dev/null && make_repos && cd "$WORK" &&
+  make_repos && cd "$WORK" &&
   out=$(gs install) && assert_contains "$out" "Installed: $WORK" &&
   assert_eq "$(git config -f "$GIT_SYNC_HOME/config" --get-all sync.repo)" "$WORK"
 }
 test_install_idempotent() {
-  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null &&
+  make_repos && gs install "$WORK" >/dev/null &&
   out=$(gs install "$WORK") && assert_contains "$out" "Already installed" &&
   assert_eq "$(git config -f "$GIT_SYNC_HOME/config" --get-all sync.repo | wc -l | tr -d ' ')" 1
 }
 test_install_subdir_resolves_root() {
-  gs init >/dev/null && make_repos && mkdir -p "$WORK/a/b" &&
+  make_repos && mkdir -p "$WORK/a/b" &&
   gs install "$WORK/a/b" >/dev/null &&
   assert_eq "$(git config -f "$GIT_SYNC_HOME/config" --get-all sync.repo)" "$WORK"
 }
 test_install_linked_worktree_registers_main() {
-  gs init >/dev/null && make_repos && git -C "$WORK" worktree add -q "$T/wt" -b feature &&
+  make_repos && git -C "$WORK" worktree add -q "$T/wt" -b feature &&
   gs install "$T/wt" >/dev/null 2>"$T/err" &&
   assert_contains "$(cat "$T/err")" "linked worktree" &&
   assert_eq "$(git config -f "$GIT_SYNC_HOME/config" --get-all sync.repo)" "$WORK" &&
   assert_contains "$(cat "$GIT_SYNC_HOME/git-sync.log")" "WARN"
 }
 test_install_not_a_repo() {
-  gs init >/dev/null && mkdir "$T/plain" &&
+  mkdir "$T/plain" &&
   { gs install "$T/plain" 2>"$T/err"; assert_eq $? 1; } &&
   assert_contains "$(cat "$T/err")" "not a git repository"
 }
 test_install_sets_origin_head() {
-  gs init >/dev/null && make_repos && git -C "$WORK" remote set-head origin -d &&
+  make_repos && git -C "$WORK" remote set-head origin -d &&
   gs install "$WORK" >/dev/null &&
   assert_eq "$(git -C "$WORK" symbolic-ref --short refs/remotes/origin/HEAD)" origin/main
 }
 test_install_path_with_spaces() {
-  gs init >/dev/null && make_repos "my repo" &&
+  make_repos "my repo" &&
   gs install "$WORK" >/dev/null &&
   out=$(gs list) && assert_contains "$out" "$WORK  fast-forward  never" &&
   gs uninstall "$WORK" >/dev/null && assert_eq "$(gs list)" "No repos."
 }
 test_uninstall_cleans_up() {
-  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null &&
+  make_repos && gs install "$WORK" >/dev/null &&
   (cd "$WORK" && gs config sync.mode maintain-only) &&
   sf="$GIT_SYNC_HOME/status/$(printf %s "$WORK" | shasum -a 1 | cut -c1-16)" &&
   : > "$sf" &&
@@ -363,15 +393,15 @@ test_uninstall_cleans_up() {
   assert_eq "$(gs list)" "No repos."
 }
 test_uninstall_not_listed() {
-  gs init >/dev/null && make_repos &&
+  make_repos &&
   { gs uninstall "$WORK" 2>/dev/null; assert_eq $? 1; }
 }
 test_uninstall_missing_path() {
-  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null && rm -rf "$WORK" &&
+  make_repos && gs install "$WORK" >/dev/null && rm -rf "$WORK" &&
   gs uninstall "$WORK" >/dev/null && assert_eq "$(gs list)" "No repos."
 }
 test_list_formats() {
-  gs init >/dev/null && assert_eq "$(gs list)" "No repos." &&
+  assert_eq "$(gs list)" "No repos." &&
   make_repos && gs install "$WORK" >/dev/null &&
   (cd "$WORK" && gs config sync.mode maintain-and-fetch) &&
   assert_eq "$(gs list)" "$WORK  maintain-and-fetch  never" &&
@@ -382,11 +412,11 @@ sf_of() { echo "$GIT_SYNC_HOME/status/$(printf %s "$1" | shasum -a 1 | cut -c1-1
 sget() { git config -f "$(sf_of "$1")" "status.$2"; }
 
 test_sync_outside_repo_usage() {
-  gs init >/dev/null && mkdir "$T/p" && cd "$T/p" &&
+  mkdir "$T/p" && cd "$T/p" &&
   { gs sync 2>"$T/err"; assert_eq $? 2; } && assert_contains "$(cat "$T/err")" "--all"
 }
 test_sync_fetch_updates_remote_refs() {
-  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null &&
+  make_repos && gs install "$WORK" >/dev/null &&
   (cd "$WORK" && gs config sync.mode maintain-and-fetch) &&
   push_commit main m2 && cd "$WORK" && out=$(gs sync) &&
   assert_eq "$out" "$WORK: ok" &&
@@ -395,20 +425,20 @@ test_sync_fetch_updates_remote_refs() {
   [ -n "$(sget "$WORK" lastRun)" ] && [ -n "$(sget "$WORK" lastSuccess)" ]
 }
 test_sync_prunes_deleted_remote_branch() {
-  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null &&
+  make_repos && gs install "$WORK" >/dev/null &&
   (cd "$T/pusher" && git push -q origin main:tmp) && (cd "$WORK" && gs sync >/dev/null) &&
   git -C "$WORK" rev-parse -q --verify origin/tmp >/dev/null &&
   (cd "$T/pusher" && git push -q origin :tmp) && (cd "$WORK" && gs sync >/dev/null) &&
   ! git -C "$WORK" rev-parse -q --verify origin/tmp >/dev/null
 }
 test_sync_maintain_only_no_fetch() {
-  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null &&
+  make_repos && gs install "$WORK" >/dev/null &&
   (cd "$WORK" && gs config sync.mode maintain-only) && before=$(git -C "$WORK" rev-parse origin/main) &&
   push_commit main m2 && (cd "$WORK" && gs sync >/dev/null) &&
   assert_eq "$(git -C "$WORK" rev-parse origin/main)" "$before" && assert_eq "$(sget "$WORK" result)" ok
 }
 test_fetch_dead_remote_isolated() {
-  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null &&
+  make_repos && gs install "$WORK" >/dev/null &&
   (cd "$WORK" && gs config sync.mode maintain-and-fetch) &&
   git -C "$WORK" remote add dead "$T/nope.git" && push_commit main m2 &&
   { (cd "$WORK" && gs sync >"$T/out"); assert_eq $? 1; } &&
@@ -418,58 +448,57 @@ test_fetch_dead_remote_isolated() {
   assert_contains "$(cat "$T/out")" "$WORK: blocked (fetch-failed:dead)"
 }
 test_sync_all_and_missing() {
-  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null &&
+  make_repos && gs install "$WORK" >/dev/null &&
   git clone -q "$T/remote.git" "$T/other" && gs install "$T/other" >/dev/null && rm -rf "$T/other" &&
   { gs sync --all >"$T/out" 2>&1; assert_eq $? 1; } &&
   assert_contains "$(cat "$T/out")" "$WORK: ok" && assert_contains "$(cat "$T/out")" "$T/other: missing" &&
   assert_eq "$(sget "$T/other" result)" missing && assert_contains "$(cat "$GIT_SYNC_HOME/git-sync.log")" "WARN"
 }
 test_sync_all_no_repos() {
-  gs init >/dev/null &&
   { gs sync --all >"$T/out" 2>&1; assert_eq $? 0; } &&
   { gs sync --all --job >>"$T/out" 2>&1; assert_eq $? 0; } &&
   assert_eq "$(cat "$T/out")" "" &&
   assert_eq "$(grep -c "run end: 0 ok, 0 blocked, 0 failed" "$GIT_SYNC_HOME/git-sync.log")" 2
 }
 test_sync_invalid_repo() {
-  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null && rm -rf "$WORK/.git" &&
+  make_repos && gs install "$WORK" >/dev/null && rm -rf "$WORK/.git" &&
   { gs sync --all >/dev/null 2>&1; assert_eq $? 1; } &&
   assert_eq "$(sget "$WORK" result)" error &&
   assert_contains "$(git config -f "$(sf_of "$WORK")" --get-all status.blocker)" "repo:invalid"
 }
 test_sync_unlisted_repo_no_status() {
-  gs init >/dev/null && make_repos && cd "$WORK" &&
+  make_repos && cd "$WORK" &&
   gs sync >/dev/null 2>"$T/err" && assert_contains "$(cat "$T/err")" "git-sync install" &&
   assert_no_file "$(sf_of "$WORK")"
 }
 test_status_file_rewritten_not_grown() {
-  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null &&
+  make_repos && gs install "$WORK" >/dev/null &&
   git -C "$WORK" remote add dead "$T/nope.git" &&
   quiet "$GS" sync --all && quiet "$GS" sync --all && quiet "$GS" sync --all &&
   assert_eq "$(git config -f "$(sf_of "$WORK")" --get-all status.blocker | wc -l | tr -d ' ')" 1 &&
   ! ls -a "$GIT_SYNC_HOME/status" | grep -q tmp
 }
 test_last_success_carried_over() {
-  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null &&
+  make_repos && gs install "$WORK" >/dev/null &&
   (cd "$WORK" && gs sync >/dev/null) && ok_at=$(sget "$WORK" lastSuccess) && [ -n "$ok_at" ] &&
   sleep 1 && git -C "$WORK" remote add dead "$T/nope.git" && (cd "$WORK" && gs sync >/dev/null);
   assert_eq "$(sget "$WORK" result)" blocked && assert_eq "$(sget "$WORK" lastSuccess)" "$ok_at"
 }
 test_lock_held_skips() {
-  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null || return 1
+  make_repos && gs install "$WORK" >/dev/null || return 1
   printf '#!/bin/sh\nsleep 30\n' > "$T/bin/git-sync-holder" && chmod +x "$T/bin/git-sync-holder" || return 1
   "$T/bin/git-sync-holder" & pid=$! ; mkdir "$GIT_SYNC_HOME/lock" && echo $pid > "$GIT_SYNC_HOME/lock/pid" &&
   out=$(gs sync --all) ; rc=$? ; kill $pid ;
   assert_eq $rc 0 && assert_contains "$out" "another run in progress" && assert_no_file "$(sf_of "$WORK")"
 }
 test_offline_check_online_syncs() {
-  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null && push_commit develop &&
+  make_repos && gs install "$WORK" >/dev/null && push_commit develop &&
   gs sync --all >/dev/null && assert_eq "$(cat "$T/route.calls")" "-n get default" &&
   assert_eq "$(git -C "$WORK" rev-parse origin/develop)" "$(git -C "$T/remote.git" rev-parse develop)" &&
   assert_eq "$(sget "$WORK" result)" ok
 }
 test_offline_job_run_skipped() {
-  gs init >/dev/null && gs notifications enable >/dev/null && gs config --global notify.events "blocked finished" &&
+  gs notifications enable >/dev/null && gs config --global notify.events "blocked finished" &&
   make_repos && gs install "$WORK" >/dev/null && quiet "$GS" sync --all && rm -f "$T/notify.calls" &&
   cp "$(sf_of "$WORK")" "$T/status.before" && before=$(git -C "$WORK" rev-parse origin/develop) &&
   git -C "$WORK" remote add dead "$T/nope.git" && push_commit develop && touch "$T/offline" || return 1
@@ -481,7 +510,7 @@ test_offline_job_run_skipped() {
   assert_contains "$(cat "$GIT_SYNC_HOME/git-sync.log")" "INFO offline, run skipped"
 }
 test_offline_manual_runs_skipped() {
-  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null && touch "$T/offline" &&
+  make_repos && gs install "$WORK" >/dev/null && touch "$T/offline" &&
   git clone -q "$T/remote.git" "$T/un listed" || return 1
   out=$(gs sync --all 2>&1); rc=$?
   assert_eq $rc 1 && assert_eq "$out" offline || return 1
@@ -496,7 +525,7 @@ test_offline_manual_runs_skipped() {
 }
 streak_get() { git config -f "$GIT_SYNC_HOME/state" "offline.$1"; }
 test_offline_streak_written_and_updated() {
-  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null && touch "$T/offline" || return 1
+  make_repos && gs install "$WORK" >/dev/null && touch "$T/offline" || return 1
   quiet "$GS" sync --all --job
   since=$(streak_get since) && last=$(streak_get lastSkip) &&
   case $since in 20*T*) ;; *) echo "bad since: $since"; return 1 ;; esac &&
@@ -506,7 +535,7 @@ test_offline_streak_written_and_updated() {
   case $(streak_get lastSkip) in "$since"|'') echo "lastSkip not updated"; return 1 ;; esac
 }
 test_offline_zero_repos_keeps_streak() {
-  gs init >/dev/null && touch "$T/offline" &&
+  touch "$T/offline" && mkdir -p "$GIT_SYNC_HOME" &&
   git config -f "$GIT_SYNC_HOME/state" offline.since 2000-01-01T00:00:00+0000 &&
   git config -f "$GIT_SYNC_HOME/state" offline.lastSkip 2000-01-02T00:00:00+0000 || return 1
   quiet "$GS" sync --all --job
@@ -514,7 +543,7 @@ test_offline_zero_repos_keeps_streak() {
   assert_eq "$(streak_get lastSkip)" 2000-01-02T00:00:00+0000
 }
 test_offline_streak_status_and_cleared() {
-  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null || return 1
+  make_repos && gs install "$WORK" >/dev/null || return 1
   assert_not_contains "$(gs status)" "Offline:" || return 1
   git config -f "$GIT_SYNC_HOME/state" offline.since 2000-01-01T00:00:00+0000 &&
   git config -f "$GIT_SYNC_HOME/state" offline.lastSkip 2000-01-02T00:00:00+0000 || return 1
@@ -526,7 +555,7 @@ test_offline_streak_status_and_cleared() {
   assert_not_contains "$(gs status)" "Offline:"
 }
 test_offline_lock_held_reports_in_progress() {
-  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null && touch "$T/offline" || return 1
+  make_repos && gs install "$WORK" >/dev/null && touch "$T/offline" || return 1
   printf '#!/bin/sh\nsleep 30\n' > "$T/bin/git-sync-holder" && chmod +x "$T/bin/git-sync-holder" || return 1
   "$T/bin/git-sync-holder" & pid=$! ; mkdir "$GIT_SYNC_HOME/lock" && echo $pid > "$GIT_SYNC_HOME/lock/pid" &&
   git config -f "$GIT_SYNC_HOME/state" offline.since 2000-01-01T00:00:00+0000 &&
@@ -536,7 +565,7 @@ test_offline_lock_held_reports_in_progress() {
   cmp -s "$GIT_SYNC_HOME/state" "$T/state.before"
 }
 test_offline_all_maintain_only_not_checked() {
-  gs init >/dev/null && make_repos &&
+  make_repos &&
   git clone -q "$T/remote.git" "$T/sec ond:repo" && (cd "$T/sec ond:repo" && gs config sync.mode maintain-only) &&
   gs config --global sync.mode fast-forward && (cd "$WORK" && gs config sync.mode maintain-only) &&
   gs install "$WORK" >/dev/null && gs install "$T/sec ond:repo" >/dev/null && touch "$T/offline" || return 1
@@ -545,14 +574,14 @@ test_offline_all_maintain_only_not_checked() {
   assert_eq "$(sget "$WORK" result)" ok && assert_eq "$(sget "$T/sec ond:repo" result)" ok
 }
 test_offline_manual_maintain_only_not_checked() {
-  gs init >/dev/null && make_repos && (cd "$WORK" && gs config sync.mode maintain-only) &&
+  make_repos && (cd "$WORK" && gs config sync.mode maintain-only) &&
   gs install "$WORK" >/dev/null && touch "$T/offline" || return 1
   out=$(cd "$T" && gs sync "$WORK" 2>&1); rc=$?
   assert_eq $rc 0 && assert_no_file "$T/route.calls" && assert_not_contains "$out" offline &&
   assert_eq "$(sget "$WORK" result)" ok
 }
 test_offline_mixed_modes_skipped() {
-  gs init >/dev/null && gs config --global sync.mode maintain-only && make_repos &&
+  gs config --global sync.mode maintain-only && make_repos &&
   git clone -q "$T/remote.git" "$T/fetch er" && (cd "$T/fetch er" && gs config sync.mode maintain-and-fetch) &&
   gs install "$WORK" >/dev/null && gs install "$T/fetch er" >/dev/null && touch "$T/offline" || return 1
   out=$(gs sync --all 2>&1); rc=$?
@@ -560,7 +589,7 @@ test_offline_mixed_modes_skipped() {
   assert_no_file "$(sf_of "$WORK")" && assert_no_file "$(sf_of "$T/fetch er")"
 }
 test_offline_missing_repo_skipped() {
-  gs init >/dev/null && gs config --global sync.mode maintain-only && make_repos &&
+  gs config --global sync.mode maintain-only && make_repos &&
   mkdir "$T/gone" && git init -q "$T/gone" &&
   gs install "$WORK" >/dev/null && gs install "$T/gone" >/dev/null && rm -rf "$T/gone" && touch "$T/offline" || return 1
   out=$(gs sync --all 2>&1); rc=$?
@@ -568,7 +597,7 @@ test_offline_missing_repo_skipped() {
   assert_no_file "$(sf_of "$WORK")"
 }
 test_offline_check_disabled() {
-  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null &&
+  make_repos && gs install "$WORK" >/dev/null &&
   git -C "$WORK" remote add dead "$T/nope.git" && touch "$T/offline" || return 1
   git -C "$WORK" config git-sync.disableOfflineCheck true &&
   out=$(cd "$WORK" && gs sync 2>&1); rc=$?
@@ -580,18 +609,18 @@ test_offline_check_disabled() {
   assert_contains "$(sget "$WORK" blocker)" "fetch-failed:dead"
 }
 test_lock_reused_pid_reclaimed() {
-  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null || return 1
+  make_repos && gs install "$WORK" >/dev/null || return 1
   sleep 30 & pid=$! ; mkdir "$GIT_SYNC_HOME/lock" && echo $pid > "$GIT_SYNC_HOME/lock/pid" &&
   gs sync --all >/dev/null ; rc=$? ; kill $pid ;
   assert_eq $rc 0 && assert_file "$(sf_of "$WORK")" && [ ! -d "$GIT_SYNC_HOME/lock" ]
 }
 test_lock_stale_reclaimed() {
-  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null &&
+  make_repos && gs install "$WORK" >/dev/null &&
   mkdir "$GIT_SYNC_HOME/lock" && echo 999999 > "$GIT_SYNC_HOME/lock/pid" &&
   gs sync --all >/dev/null && assert_file "$(sf_of "$WORK")" && [ ! -d "$GIT_SYNC_HOME/lock" ]
 }
 test_log_rotation() {
-  gs init >/dev/null && gs config --global log.maxSize 1K && make_repos && gs install "$WORK" >/dev/null &&
+  gs config --global log.maxSize 1K && make_repos && gs install "$WORK" >/dev/null &&
   head -c 2000 /dev/zero | tr '\0' x > "$GIT_SYNC_HOME/git-sync.log" &&
   gs sync --all >/dev/null && assert_file "$GIT_SYNC_HOME/git-sync.log.1" &&
   [ "$(wc -c < "$GIT_SYNC_HOME/git-sync.log")" -lt 1024 ] &&
@@ -606,7 +635,7 @@ EOF
   chmod +x "$T/bin/ssh"
 }
 test_sync_env_injected() {
-  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null && ssh_stub &&
+  make_repos && gs install "$WORK" >/dev/null && ssh_stub &&
   git -C "$WORK" remote add sshr "ssh://example.invalid/x.git" &&
   ( unset GIT_SSH_COMMAND GIT_SSH GIT_OPTIONAL_LOCKS; PATH="$T/bin:$PATH"; cd "$WORK" && gs sync >/dev/null 2>&1 );
   a=$(cat "$T/ssh.args" 2>/dev/null) &&
@@ -615,7 +644,7 @@ test_sync_env_injected() {
   assert_contains "$(blockers)" "fetch-failed:sshr"
 }
 test_sync_env_respects_core_sshcommand() {
-  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null && ssh_stub &&
+  make_repos && gs install "$WORK" >/dev/null && ssh_stub &&
   git -C "$WORK" remote add sshr "ssh://example.invalid/x.git" &&
   git -C "$WORK" config core.sshCommand "\"$T/bin/ssh\" --marker" &&
   ( unset GIT_SSH_COMMAND GIT_SSH; cd "$WORK" && gs sync >/dev/null 2>&1 );
@@ -636,7 +665,7 @@ marked() { pgrep -f "$T/bin/ssh"; [ -z "${1:-}" ] || pgrep -fx "sleep $1"; }
 gs_ssh() { ( unset GIT_SSH_COMMAND GIT_SSH; PATH="$T/bin:$PATH"; gs "$@" ); }
 
 test_fetch_timeout_hung_remote() {
-  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null && hang_stub &&
+  make_repos && gs install "$WORK" >/dev/null && hang_stub &&
   gs config --global sync.fetchTimeout 2s && gs config --global sync.branches develop &&
   git -C "$WORK" remote add up "$T/remote.git" &&
   push_commit develop d2 && git -C "$WORK" fetch -q origin &&
@@ -658,14 +687,14 @@ test_fetch_timeout_hung_remote() {
   assert_eq "$(git -C "$WORK" rev-parse develop)" "$(git -C "$T/remote.git" rev-parse develop)"
 }
 test_fetch_timeout_normal_fetch_unchanged() {
-  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null &&
+  make_repos && gs install "$WORK" >/dev/null &&
   gs config --global sync.fetchTimeout 47 && push_commit main m2 && git -C "$WORK" checkout -q develop &&
   out=$(cd "$WORK" && gs sync 2>&1) && assert_eq "$out" "$WORK: ok" &&
   assert_eq "$(git -C "$WORK" rev-parse main)" "$(git -C "$T/remote.git" rev-parse main)" &&
   assert_eq "$(marked 47)" ""
 }
 test_fetch_timeout_parallel_and_notify() {
-  gs init >/dev/null && gs notifications enable >/dev/null && gs config --global sync.jobs 2 &&
+  gs notifications enable >/dev/null && gs config --global sync.jobs 2 &&
   gs config --global sync.fetchTimeout 2 && gs config --global sync.branches develop &&
   make_repos && gs install "$WORK" >/dev/null && ssh_stub &&
   git clone -q "$T/remote.git" "$T/r2" && git -C "$T/r2" branch -q --track develop origin/develop &&
@@ -685,7 +714,7 @@ test_fetch_timeout_parallel_and_notify() {
   assert_eq "$(marked)" ""
 }
 test_fetch_timeout_kill_escalation() {
-  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null && hang_stub ignore-term &&
+  make_repos && gs install "$WORK" >/dev/null && hang_stub ignore-term &&
   gs config --global sync.fetchTimeout 1 &&
   git -C "$WORK" remote set-url origin "ssh://example.invalid/x.git" || return 1
   out=$(cd "$WORK" && gs_ssh sync 2>&1)
@@ -724,7 +753,7 @@ interrupted_run() {
   assert_not_contains "$(cat "$T/int.out")" "Interrupt"
 }
 test_interrupt_inline_run_stops_fetch() {
-  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null && hang_stub &&
+  make_repos && gs install "$WORK" >/dev/null && hang_stub &&
   gs config --global sync.fetchTimeout 53 &&
   git -C "$WORK" remote set-url origin "ssh://example.invalid/x.git" || return 1
   for sig in TERM INT; do
@@ -735,7 +764,7 @@ test_interrupt_inline_run_stops_fetch() {
   assert_eq "$out" "$WORK: blocked (fetch-failed:origin)"
 }
 test_interrupt_parallel_run_stops_fetches() {
-  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null && hang_stub &&
+  make_repos && gs install "$WORK" >/dev/null && hang_stub &&
   git clone -q "$T/remote.git" "$T/r2" && gs install "$T/r2" >/dev/null &&
   gs config --global sync.fetchTimeout 53 && gs config --global sync.jobs 2 &&
   git -C "$WORK" remote set-url origin "ssh://example.invalid/x.git" &&
@@ -748,7 +777,7 @@ test_interrupt_parallel_run_stops_fetches() {
   assert_contains "$out" "$T/r2: blocked (fetch-failed:origin)"
 }
 test_interrupt_kills_fetch_that_ignores_term() {
-  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null && hang_stub ignore-term &&
+  make_repos && gs install "$WORK" >/dev/null && hang_stub ignore-term &&
   git clone -q "$T/remote.git" "$T/r2" && gs install "$T/r2" >/dev/null &&
   gs config --global sync.fetchTimeout 53 && gs config --global sync.jobs 2 &&
   git -C "$WORK" remote set-url origin "ssh://example.invalid/x.git" &&
@@ -759,7 +788,7 @@ test_interrupt_kills_fetch_that_ignores_term() {
   done
 }
 test_interrupt_during_timeout_grace_kills_fetch() {
-  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null && hang_stub ignore-term &&
+  make_repos && gs install "$WORK" >/dev/null && hang_stub ignore-term &&
   gs config --global sync.fetchTimeout 1 &&
   git -C "$WORK" remote set-url origin "ssh://example.invalid/x.git" || return 1
   # the timer has fired; the fetch ignores TERM and awaits its KILL
@@ -767,7 +796,7 @@ test_interrupt_during_timeout_grace_kills_fetch() {
 }
 test_interrupt_during_jitter_is_prompt() {
   # two workers, so that the run is still sleeping even if one draws a tiny delay
-  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null &&
+  make_repos && gs install "$WORK" >/dev/null &&
   git clone -q "$T/remote.git" "$T/r2" && gs install "$T/r2" >/dev/null &&
   gs config --global sync.jobs 2 && gs config --global sync.jitter 50 &&
   gs config --global sync.mode maintain-only || return 1
@@ -776,14 +805,14 @@ test_interrupt_during_jitter_is_prompt() {
   done
 }
 test_interrupt_removes_fetch_dir_of_killed_worker() {
-  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null && hang_stub &&
+  make_repos && gs install "$WORK" >/dev/null && hang_stub &&
   gs config --global sync.fetchTimeout 53 &&
   git -C "$WORK" remote set-url origin "ssh://example.invalid/x.git" || return 1
   # fetch.1 stands for the temp dir of a worker of this run that was SIGKILLed
   interrupted_run 'fetches 1 && mkdir -p "$GIT_SYNC_HOME/fetch.1"' TERM sync --all
 }
 test_fetch_timeout_maintenance_still_runs() {
-  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null && hang_stub &&
+  make_repos && gs install "$WORK" >/dev/null && hang_stub &&
   gs config --global sync.fetchTimeout 1 &&
   # a negative auto limit makes `maintenance run --auto` always write the commit-graph
   git -C "$WORK" config maintenance.commit-graph.auto -1 &&
@@ -812,7 +841,7 @@ run_state() { find "$GIT_SYNC_HOME" -mindepth 1 -maxdepth 1 -type d ! -name stat
 # two_on_down_host: $WORK and "$T/r 2" installed with sync.branches develop; both have
 # origin/develop ahead of develop, then origin moved to the fake host down.invalid.
 two_on_down_host() {
-  gs init >/dev/null && gs config --global sync.branches develop && make_repos &&
+  gs config --global sync.branches develop && make_repos &&
   git clone -q "$T/remote.git" "$T/r 2" && git -C "$T/r 2" branch -q --track develop origin/develop &&
   gs install "$WORK" >/dev/null && gs install "$T/r 2" >/dev/null && push_commit develop d2 &&
   git -C "$WORK" fetch -q origin && git -C "$T/r 2" fetch -q origin &&
@@ -835,7 +864,7 @@ test_host_skip_sequential_two_repos() {
   assert_eq "$(run_state)" ""
 }
 test_host_skip_second_remote_same_repo() {
-  gs init >/dev/null && gs config --global sync.branches develop && make_repos &&
+  gs config --global sync.branches develop && make_repos &&
   gs install "$WORK" >/dev/null && git -C "$WORK" remote add up "$T/remote.git" &&
   git -C "$WORK" fetch -q up && git -C "$WORK" branch -q -u up/develop develop &&
   git -C "$WORK" remote set-url origin "ssh://down.invalid/x.git" &&
@@ -870,7 +899,7 @@ fetch-timeout:origin timed out after 1" &&
   assert_eq "$(marked)" ""
 }
 test_host_skip_state_of_killed_run_removed() {
-  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null && down_stub &&
+  make_repos && gs install "$WORK" >/dev/null && down_stub &&
   git -C "$WORK" remote set-url origin "ssh://down.invalid/x.git" &&
   git -C "$WORK" remote add second "ssh://hang.invalid/y.git" || return 1
   # killed while fetching `second`, after origin marked its host unreachable
@@ -1049,7 +1078,7 @@ test_host_report_finished_notification() {
   assert_eq "$(ncalls | grep -c unreachable)" 0
 }
 test_host_report_none_without_skips() {
-  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null && down_stub &&
+  make_repos && gs install "$WORK" >/dev/null && down_stub &&
   git -C "$WORK" remote set-url origin "ssh://down.invalid/x.git" &&
   gs notifications enable >/dev/null && gs config --global notify.events finished || return 1
   out=$(gs_ssh sync --all 2>&1)
@@ -1081,7 +1110,7 @@ test_host_skip_new_fetch_failed_still_notifies() {
   assert_eq "$(ncalls)" "git-sync: r 2|fetch-failed:dead"
 }
 
-ffsetup() { gs init >/dev/null && make_repos "$@" && gs install "$WORK" >/dev/null; }
+ffsetup() { make_repos "$@" && gs install "$WORK" >/dev/null; }
 blockers() { git config -f "$(sf_of "$WORK")" --get-all status.blocker; }
 notes() { git config -f "$(sf_of "$WORK")" --get-all status.note; }
 
@@ -1211,14 +1240,14 @@ test_ff_mode_fetch_only_does_not_ff() {
   assert_eq "$(git -C "$WORK" rev-parse main)" "$before"
 }
 test_sync_all_stdin_not_consumed() {
-  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null &&
+  make_repos && gs install "$WORK" >/dev/null &&
   git clone -q "$T/remote.git" "$T/work2" && gs install "$T/work2" >/dev/null &&
   gs sync --all >/dev/null &&
   assert_file "$(sf_of "$WORK")" && assert_file "$(sf_of "$T/work2")"
 }
 
 test_start_writes_plist_and_bootstraps() {
-  gs init >/dev/null && out=$(gs start) && assert_contains "$out" "Started (every 20m)" &&
+  out=$(gs start) && assert_contains "$out" "Started (every 20m)" &&
   p="$GIT_SYNC_AGENTS_DIR/com.git-sync.agent.plist" && assert_file "$p" &&
   plutil -lint "$p" >/dev/null &&
   assert_eq "$(plutil -extract StartInterval raw "$p")" 1200 &&
@@ -1229,21 +1258,21 @@ test_start_writes_plist_and_bootstraps() {
   assert_contains "$(cat "$T/launchctl.calls")" "bootstrap gui/$(id -u) $p"
 }
 test_start_idempotent_and_stop() {
-  gs init >/dev/null && gs start >/dev/null && gs start >/dev/null &&
+  gs start >/dev/null && gs start >/dev/null &&
   assert_eq "$(grep -c '^bootstrap' "$T/launchctl.calls")" 2 &&
   gs stop >/dev/null && assert_no_file "$GIT_SYNC_AGENTS_DIR/com.git-sync.agent.plist" &&
   gs stop >/dev/null
 }
 test_period_change_reloads_agent() {
-  gs init >/dev/null && gs start >/dev/null && gs config --global sync.period 1h &&
+  gs start >/dev/null && gs config --global sync.period 1h &&
   assert_eq "$(plutil -extract StartInterval raw "$GIT_SYNC_AGENTS_DIR/com.git-sync.agent.plist")" 3600
 }
 test_period_change_without_agent_does_not_start() {
-  gs init >/dev/null && gs config --global sync.period 1h &&
+  gs config --global sync.period 1h &&
   assert_no_file "$GIT_SYNC_AGENTS_DIR/com.git-sync.agent.plist"
 }
 test_status_output() {
-  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null &&
+  make_repos && gs install "$WORK" >/dev/null &&
   out=$(gs status --verbose) && assert_contains "$out" "Agent:         not loaded" &&
   assert_contains "$out" "Period:        20m" && assert_contains "$out" "Notifications: disabled" &&
   assert_contains "$out" "  result:        never" &&
@@ -1254,7 +1283,7 @@ test_status_output() {
   assert_contains "$out" "  note:          main: skipped (checked out)" && assert_contains "$out" "  last run:"
 }
 test_status_compact() {
-  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null &&
+  make_repos && gs install "$WORK" >/dev/null &&
   git clone -q "$T/remote.git" "$T/other" && gs install "$T/other" >/dev/null &&
   git clone -q "$T/remote.git" "$T/gone" && gs install "$T/gone" >/dev/null && rm -rf "$T/gone" &&
   push_commit main && git -C "$WORK" remote add dead "$T/nope.git" && quiet "$GS" sync --all &&
@@ -1275,7 +1304,7 @@ test_status_compact() {
   assert_eq "$(printf '%s\n' "$out" | wc -l | tr -d ' ')" 9
 }
 test_status_time_ago() {
-  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null && quiet "$GS" sync --all &&
+  make_repos && gs install "$WORK" >/dev/null && quiet "$GS" sync --all &&
   sf=$(sf_of "$WORK") &&
   for spec in "-30S|< 1m ago" "-1M|1 minute ago" "-5M|5 minutes ago" "-1H|1 hour ago" \
               "-23H|23 hours ago" "-1d|1 day ago" "-40d|40 days ago"; do
@@ -1284,14 +1313,14 @@ test_status_time_ago() {
   done
 }
 test_sync_path_argument() {
-  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null &&
+  make_repos && gs install "$WORK" >/dev/null &&
   git clone -q "$T/remote.git" "$T/other" && gs install "$T/other" >/dev/null &&
   mkdir -p "$WORK/sub" && cd "$T" &&
   out=$(gs sync "$WORK/sub") && assert_eq "$out" "$WORK: ok" &&
   assert_file "$(sf_of "$WORK")" && assert_no_file "$(sf_of "$T/other")"
 }
 test_sync_path_unlisted_and_errors() {
-  gs init >/dev/null && make_repos && cd "$T" &&
+  make_repos && cd "$T" &&
   gs sync "$WORK" >/dev/null 2>"$T/err" && assert_contains "$(cat "$T/err")" "git-sync install" &&
   assert_no_file "$(sf_of "$WORK")" &&
   mkdir "$T/plain" &&
@@ -1301,7 +1330,7 @@ test_sync_path_unlisted_and_errors() {
   { gs sync "$WORK" "$WORK" 2>/dev/null; assert_eq $? 2; }
 }
 test_status_attention_first_default() {
-  gs init >/dev/null && make_repos &&
+  make_repos &&
   git clone -q "$T/remote.git" "$T/a" && gs install "$T/a" >/dev/null &&
   git clone -q "$T/remote.git" "$T/b" && gs install "$T/b" >/dev/null &&
   git clone -q "$T/remote.git" "$T/gone" && gs install "$T/gone" >/dev/null &&
@@ -1318,18 +1347,18 @@ test_status_attention_first_default() {
   { gs status --blocked-first 2>/dev/null; assert_eq $? 2; }
 }
 test_status_compact_tilde_and_bad_flag() {
-  gs init >/dev/null && git init -q "$HOME/proj" && gs install "$HOME/proj" >/dev/null &&
+  git init -q "$HOME/proj" && gs install "$HOME/proj" >/dev/null &&
   assert_contains "$(gs status)" "pending  never          ~/proj" &&
   { gs status --bogus 2>/dev/null; assert_eq $? 2; }
 }
 test_status_no_repos() {
-  gs init >/dev/null && out=$(gs status) && assert_contains "$out" "No repos."
+  out=$(gs status) && assert_contains "$out" "No repos."
 }
 
 ncalls() { cat "$T/notify.calls" 2>/dev/null; }
 
 test_notifications_command() {
-  gs init >/dev/null && assert_eq "$(gs notifications)" disabled &&
+  assert_eq "$(gs notifications)" disabled &&
   gs notifications enable >/dev/null && assert_eq "$(gs notifications)" "enabled (blocked)" &&
   gs config --global notify.events "finished blocked" && assert_eq "$(gs notifications)" "enabled (finished blocked)" &&
   { gs config --global notify.events "start finished" 2>/dev/null; [ $? -ne 0 ]; } &&
@@ -1337,14 +1366,14 @@ test_notifications_command() {
   { gs notifications maybe 2>/dev/null; assert_eq $? 2; }
 }
 test_notify_only_in_job_and_enabled() {
-  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null && git -C "$WORK" remote add dead "$T/nope.git" &&
+  make_repos && gs install "$WORK" >/dev/null && git -C "$WORK" remote add dead "$T/nope.git" &&
   quiet "$GS" sync --all --job && assert_eq "$(ncalls)" "" &&
   gs notifications enable >/dev/null && quiet "$GS" sync --all && assert_eq "$(ncalls)" "" &&
   git -C "$WORK" remote add dead2 "$T/nope2.git" &&
   quiet "$GS" sync --all --job && assert_contains "$(ncalls)" "git-sync: work|fetch-failed:dead2"
 }
 test_notify_blocked_dedupe() {
-  gs init >/dev/null && gs notifications enable >/dev/null && make_repos && gs install "$WORK" >/dev/null &&
+  gs notifications enable >/dev/null && make_repos && gs install "$WORK" >/dev/null &&
   git -C "$WORK" remote add dead "$T/nope.git" &&
   quiet "$GS" sync --all --job && quiet "$GS" sync --all --job &&
   assert_eq "$(ncalls | wc -l | tr -d ' ')" 1 &&
@@ -1352,12 +1381,12 @@ test_notify_blocked_dedupe() {
   assert_eq "$(ncalls | tail -1)" "git-sync: work|fetch-failed:dead2"
 }
 test_notify_finished_summary() {
-  gs init >/dev/null && gs notifications enable >/dev/null && gs config --global notify.events finished &&
+  gs notifications enable >/dev/null && gs config --global notify.events finished &&
   make_repos && gs install "$WORK" >/dev/null && gs sync --all --job >/dev/null 2>&1 &&
   assert_eq "$(ncalls)" "git-sync|1 repos: 1 ok, 0 blocked, 0 failed"
 }
 test_notify_one_per_run_combined() {
-  gs init >/dev/null && gs notifications enable >/dev/null && gs config --global notify.events "blocked finished" &&
+  gs notifications enable >/dev/null && gs config --global notify.events "blocked finished" &&
   make_repos && gs install "$WORK" >/dev/null && git -C "$WORK" remote add dead "$T/nope.git" &&
   git clone -q "$T/remote.git" "$T/other" && gs install "$T/other" >/dev/null &&
   git -C "$T/other" remote add dead "$T/nope.git" &&
@@ -1369,18 +1398,18 @@ test_notify_one_per_run_combined() {
   assert_eq "$(ncalls | tail -1)" "git-sync|2 repos: 0 ok, 2 blocked, 0 failed"
 }
 test_notify_legacy_start_ignored() {
-  gs init >/dev/null && gs notifications enable >/dev/null &&
+  gs notifications enable >/dev/null &&
   git config -f "$GIT_SYNC_HOME/config" notify.events "start blocked" &&
   make_repos && gs install "$WORK" >/dev/null && git -C "$WORK" remote add dead "$T/nope.git" &&
   quiet "$GS" sync --all --job &&
   assert_eq "$(ncalls)" "git-sync: work|fetch-failed:dead"
 }
 test_job_mode_quiet_stdout() {
-  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null &&
+  make_repos && gs install "$WORK" >/dev/null &&
   out=$(gs sync --all --job 2>/dev/null) && assert_eq "$out" ""
 }
 test_install_recursive_depth1() {
-  gs init >/dev/null && make_repos && mkdir -p "$T/projects/plain" "$T/projects/deep/inner" &&
+  make_repos && mkdir -p "$T/projects/plain" "$T/projects/deep/inner" &&
   git clone -q "$T/remote.git" "$T/projects/a" && git clone -q "$T/remote.git" "$T/projects/b c" &&
   git clone -q "$T/remote.git" "$T/projects/deep/inner/x" &&
   gs install "$T/projects/a" >/dev/null &&
@@ -1392,7 +1421,7 @@ test_install_recursive_depth1() {
   assert_not_contains "$(gs list)" "inner"
 }
 test_install_recursive_skips_linked_worktree_dup() {
-  gs init >/dev/null && make_repos && mkdir "$T/projects" &&
+  make_repos && mkdir "$T/projects" &&
   git clone -q "$T/remote.git" "$T/projects/a" &&
   git -C "$T/projects/a" worktree add -q "$T/projects/a-wt" -b feature &&
   out=$(gs install -r "$T/projects" 2>/dev/null) &&
@@ -1400,7 +1429,7 @@ test_install_recursive_skips_linked_worktree_dup() {
   assert_eq "$(git config -f "$GIT_SYNC_HOME/config" --get-all sync.repo)" "$T/projects/a"
 }
 test_install_recursive_no_repos_and_bad_dir() {
-  gs init >/dev/null && mkdir "$T/empty" &&
+  mkdir "$T/empty" &&
   { gs install -r "$T/empty" 2>"$T/err"; assert_eq $? 1; } &&
   assert_contains "$(cat "$T/err")" "no git repositories found in $T/empty" &&
   { gs install -r "$T/nope" 2>"$T/err"; assert_eq $? 1; } &&
@@ -1410,7 +1439,7 @@ test_install_recursive_no_repos_and_bad_dir() {
 roots() { git config -f "$GIT_SYNC_HOME/config" --get-all sync.root; }
 excludes() { git config -f "$GIT_SYNC_HOME/config" --get-all sync.exclude; }
 test_watch_install_adds_root() {
-  gs init >/dev/null && make_repos && mkdir "$T/pro: jects" &&
+  make_repos && mkdir "$T/pro: jects" &&
   git clone -q "$T/remote.git" "$T/pro: jects/a" &&
   out=$(gs install -r "$T/pro: jects" --watch) &&
   assert_contains "$out" "Installed: $T/pro: jects/a" &&
@@ -1419,7 +1448,7 @@ test_watch_install_adds_root() {
   assert_eq "$(gs config sync.root)" "$T/pro: jects"
 }
 test_watch_empty_folder_and_already_watched() {
-  gs init >/dev/null && mkdir "$T/empty" && ln -s "$T/empty" "$T/link" &&
+  mkdir "$T/empty" && ln -s "$T/empty" "$T/link" &&
   out=$(gs install -r "$T/empty" --watch) &&
   assert_contains "$out" "Watching: $T/empty" &&
   out=$(cd "$T" && gs install -r link/ --watch) &&
@@ -1430,7 +1459,7 @@ test_watch_empty_folder_and_already_watched() {
   assert_eq "$(roots)" "$T/empty"
 }
 test_config_root_exclude_read_only() {
-  gs init >/dev/null && mkdir "$T/p" && gs install -r "$T/p" --watch >/dev/null &&
+  mkdir "$T/p" && gs install -r "$T/p" --watch >/dev/null &&
   assert_eq "$(gs config sync.root)" "$T/p" &&
   { gs config sync.exclude >/dev/null; assert_eq $? 1; } &&
   { gs config --global sync.root /x 2>"$T/err"; assert_eq $? 2; } &&
@@ -1440,7 +1469,7 @@ test_config_root_exclude_read_only() {
   assert_not_contains "$(gs config)" "sync.root" && assert_eq "$(roots)" "$T/p"
 }
 test_watch_scan_installs_and_syncs_new_clone() {
-  gs init >/dev/null && make_repos && mkdir "$T/a: b" && gs install -r "$T/a: b" --watch >/dev/null &&
+  make_repos && mkdir "$T/a: b" && gs install -r "$T/a: b" --watch >/dev/null &&
   git clone -q "$T/remote.git" "$T/a: b/new c" && push_commit main m2 &&
   out=$(gs sync --all) &&
   assert_contains "$out" "$T/a: b/new c: ok" &&
@@ -1451,13 +1480,13 @@ test_watch_scan_installs_and_syncs_new_clone() {
   assert_eq "$(git config -f "$GIT_SYNC_HOME/config" --get-all sync.repo)" "$T/a: b/new c"
 }
 test_watch_sync_path_does_not_scan() {
-  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null && mkdir "$T/p" &&
+  make_repos && gs install "$WORK" >/dev/null && mkdir "$T/p" &&
   gs install -r "$T/p" --watch >/dev/null && git clone -q "$T/remote.git" "$T/p/x" &&
   (cd "$WORK" && gs sync >/dev/null) && gs sync "$WORK" >/dev/null &&
   assert_eq "$(git config -f "$GIT_SYNC_HOME/config" --get-all sync.repo)" "$WORK"
 }
 test_watch_offline_skip_still_installs() {
-  gs init >/dev/null && make_repos && mkdir "$T/p" && gs install -r "$T/p" --watch >/dev/null &&
+  make_repos && mkdir "$T/p" && gs install -r "$T/p" --watch >/dev/null &&
   git clone -q "$T/remote.git" "$T/p/x" && touch "$T/offline" &&
   { gs sync --all >/dev/null 2>&1; assert_eq $? 1; } &&
   assert_eq "$(git config -f "$GIT_SYNC_HOME/config" --get-all sync.repo)" "$T/p/x" &&
@@ -1465,7 +1494,7 @@ test_watch_offline_skip_still_installs() {
   rm "$T/offline" && gs sync --all >/dev/null && assert_eq "$(sget "$T/p/x" result)" ok
 }
 test_watch_uninstall_excludes_until_install() {
-  gs init >/dev/null && make_repos && mkdir "$T/p: q" && git clone -q "$T/remote.git" "$T/p: q/x y" &&
+  make_repos && mkdir "$T/p: q" && git clone -q "$T/remote.git" "$T/p: q/x y" &&
   gs install -r "$T/p: q" --watch >/dev/null &&
   out=$(gs uninstall "$T/p: q/x y") && assert_contains "$out" "Uninstalled: $T/p: q/x y" &&
   assert_eq "$(excludes)" "$T/p: q/x y" &&
@@ -1481,7 +1510,7 @@ test_watch_uninstall_excludes_until_install() {
   out=$(gs install "$T/p: q/x y") && assert_contains "$out" "Already installed" && assert_eq "$(excludes)" ""
 }
 test_watch_unwatch_keeps_repos_and_exclusions() {
-  gs init >/dev/null && make_repos && mkdir "$T/p: q" && ln -s "$T/p: q" "$T/l" &&
+  make_repos && mkdir "$T/p: q" && ln -s "$T/p: q" "$T/l" &&
   git clone -q "$T/remote.git" "$T/p: q/a" && git clone -q "$T/remote.git" "$T/p: q/b" &&
   gs install -r "$T/p: q" --watch >/dev/null && gs uninstall "$T/p: q/b" >/dev/null &&
   out=$(gs uninstall -r "$T/l" --watch) && assert_eq "$out" "Unwatched: $T/p: q" &&
@@ -1495,7 +1524,7 @@ test_watch_unwatch_keeps_repos_and_exclusions() {
   gs uninstall -r "$T/p: q/" --watch >/dev/null && assert_eq "$(roots)" ""
 }
 test_watch_missing_root_warns() {
-  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null && mkdir "$T/p q" &&
+  make_repos && gs install "$WORK" >/dev/null && mkdir "$T/p q" &&
   gs install -r "$T/p q" --watch >/dev/null && rmdir "$T/p q" &&
   gs sync --all >/dev/null 2>"$T/err" &&
   assert_eq "$(cat "$T/err")" "git-sync: warning: watched root missing or unreadable: $T/p q" &&
@@ -1505,7 +1534,7 @@ test_watch_missing_root_warns() {
   gs sync --all --job && assert_eq "$(cat "$T/notify.calls")" "git-sync|1 repos: 1 ok, 0 blocked, 0 failed"
 }
 test_watch_bad_child_skipped() {
-  gs init >/dev/null && make_repos && mkdir -p "$T/p/bad" && echo "gitdir: $T/nope" > "$T/p/bad/.git" &&
+  make_repos && mkdir -p "$T/p/bad" && echo "gitdir: $T/nope" > "$T/p/bad/.git" &&
   gs install -r "$T/p" --watch >/dev/null 2>&1; git clone -q "$T/remote.git" "$T/p/good" &&
   gs sync --all >/dev/null 2>"$T/err" && gs sync --all >/dev/null 2>&1 &&
   assert_eq "$(cat "$T/err")" "" &&
@@ -1513,7 +1542,7 @@ test_watch_bad_child_skipped() {
   assert_eq "$(grep -c "WARN skipped $T/p/bad: not a usable repository (watched root $T/p)" "$GIT_SYNC_HOME/git-sync.log")" 2
 }
 test_watch_list_sections() {
-  gs init >/dev/null && make_repos && mkdir "$T/p" "$T/q r" && git clone -q "$T/remote.git" "$T/p/a" &&
+  make_repos && mkdir "$T/p" "$T/q r" && git clone -q "$T/remote.git" "$T/p/a" &&
   gs install -r "$T/p" --watch >/dev/null && gs install -r "$T/q r" --watch >/dev/null &&
   assert_eq "$(gs list)" "$(printf '%s\n\n%s\n%s\n%s' "$T/p/a  fast-forward  never" "Watched roots:" "  $T/p" "  $T/q r")" &&
   gs uninstall "$T/p/a" >/dev/null &&
@@ -1522,7 +1551,7 @@ test_watch_list_sections() {
   assert_eq "$(gs list)" "$(printf '%s\n\n%s\n%s' "No repos." "Excluded:" "  $T/p/a")"
 }
 test_list_watch_only_roots() {
-  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null &&
+  make_repos && gs install "$WORK" >/dev/null &&
   out=$(gs list --watch) && assert_eq "$out" "" &&
   mkdir "$T/p: q" "$T/r" && gs install -r "$T/p: q" --watch >/dev/null && gs install -r "$T/r" --watch >/dev/null &&
   assert_eq "$(gs list --watch)" "$(printf '%s\n%s' "$T/p: q" "$T/r")" &&
@@ -1530,7 +1559,7 @@ test_list_watch_only_roots() {
   assert_contains "$(cat "$T/err")" "usage: git-sync list [--watch]"
 }
 test_watch_new_note_24h() {
-  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null && mkdir "$T/p" &&
+  make_repos && gs install "$WORK" >/dev/null && mkdir "$T/p" &&
   gs install -r "$T/p" --watch >/dev/null && git clone -q "$T/remote.git" "$T/p/x" &&
   touch "$T/offline" && quiet "$GS" sync --all && rm "$T/offline" &&
   assert_contains "$(gs status)" "$(printf 'pending  never          %s\n%24snote: new' "$T/p/x" '')" &&
@@ -1546,13 +1575,13 @@ test_watch_new_note_24h() {
   assert_not_contains "$(gs status)" "note: new" && assert_not_contains "$(gs status -v)" "new"
 }
 test_watch_uninstall_outside_root_no_exclusion() {
-  gs init >/dev/null && make_repos && mkdir -p "$T/p/deep" && gs install -r "$T/p" --watch >/dev/null &&
+  make_repos && mkdir -p "$T/p/deep" && gs install -r "$T/p" --watch >/dev/null &&
   git clone -q "$T/remote.git" "$T/p/deep/x" && gs install "$T/p/deep/x" >/dev/null &&
   gs install "$WORK" >/dev/null && gs uninstall "$WORK" >/dev/null && gs uninstall "$T/p/deep/x" >/dev/null &&
   assert_eq "$(excludes)" ""
 }
 test_watch_linked_worktrees() {
-  gs init >/dev/null && make_repos && mkdir "$T/p" "$T/q" &&
+  make_repos && mkdir "$T/p" "$T/q" &&
   git -C "$WORK" worktree add -q "$T/p/work-wt" -b f1 &&
   git clone -q "$T/remote.git" "$T/q/m" && git -C "$T/q/m" worktree add -q "$T/q/m-wt" -b f2 &&
   gs install -r "$T/p" --watch >/dev/null 2>&1 && gs install -r "$T/q" --watch >/dev/null 2>&1 &&
@@ -1564,7 +1593,6 @@ test_watch_linked_worktrees() {
   assert_contains "$(cat "$GIT_SYNC_HOME/git-sync.log")" "installed $WORK (watched root $T/p)"
 }
 test_config_jobs_jitter() {
-  "$GS" init >/dev/null &&
   assert_eq "$(gs config sync.jobs)" 8 && assert_eq "$(gs config sync.jitter)" 5s &&
   gs config --global sync.jobs 1 && gs config --global sync.jobs 64 &&
   gs config --global sync.jitter 0 && gs config --global sync.jitter 60s && gs config --global sync.jitter 7 &&
@@ -1586,7 +1614,7 @@ make_many() {
   done
 }
 test_sync_parallel_all_repos() {
-  gs init >/dev/null && gs config --global sync.jobs 4 && gs config --global sync.branches develop &&
+  gs config --global sync.jobs 4 && gs config --global sync.branches develop &&
   make_repos && make_many 6 &&
   git -C "$T/r3" remote add dead "$T/nope.git" && push_commit develop d2 &&
   { gs sync --all >"$T/out" 2>&1; assert_eq $? 1; } &&
@@ -1600,7 +1628,7 @@ test_sync_parallel_all_repos() {
   ! ls "$GIT_SYNC_HOME" | grep -q '^run\.' && [ ! -d "$GIT_SYNC_HOME/lock" ]
 }
 test_sync_parallel_jobs1_and_missing() {
-  gs init >/dev/null && gs config --global sync.jobs 1 && make_repos && make_many 3 &&
+  gs config --global sync.jobs 1 && make_repos && make_many 3 &&
   rm -rf "$T/r2" &&
   { gs sync --all >"$T/out" 2>&1; assert_eq $? 1; } &&
   assert_eq "$(cat "$T/out" | wc -l | tr -d ' ')" 3 &&
@@ -1608,14 +1636,14 @@ test_sync_parallel_jobs1_and_missing() {
   assert_contains "$(cat "$GIT_SYNC_HOME/git-sync.log")" "run end: 2 ok, 0 blocked, 1 failed"
 }
 test_sync_jitter_applies_to_all_only() {
-  gs init >/dev/null && gs config --global sync.jitter 3 && make_repos && gs install "$WORK" >/dev/null &&
+  gs config --global sync.jitter 3 && make_repos && gs install "$WORK" >/dev/null &&
   start=$(date +%s) && (cd "$WORK" && gs sync >/dev/null) &&
   [ $(( $(date +%s) - start )) -lt 3 ] &&
   gs config --global sync.jitter 0 && start=$(date +%s) && gs sync --all >/dev/null &&
   [ $(( $(date +%s) - start )) -lt 3 ]
 }
 test_status_tricky_values() {
-  gs init >/dev/null && make_repos "sp ace" && gs install "$WORK" >/dev/null && quiet "$GS" sync --all &&
+  make_repos "sp ace" && gs install "$WORK" >/dev/null && quiet "$GS" sync --all &&
   sf=$(sf_of "$WORK") &&
   git config -f "$sf" status.result blocked &&
   git config -f "$sf" --add status.blocker 'main:ff-failed fatal: "x" = y; #z \ end' &&
@@ -1630,7 +1658,7 @@ test_status_tricky_values() {
   assert_contains "$(gs status)" "blocked  unknown        $WORK"
 }
 test_stale_runfile_removed() {
-  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null &&
+  make_repos && gs install "$WORK" >/dev/null &&
   printf 'ok\t-\t/ghost\n' > "$GIT_SYNC_HOME/run.99999" &&
   gs sync --all >/dev/null &&
   assert_contains "$(cat "$GIT_SYNC_HOME/git-sync.log")" "run end: 1 ok, 0 blocked, 0 failed" &&
@@ -1638,7 +1666,7 @@ test_stale_runfile_removed() {
 }
 test_hints_commands() {
   out=$(hints) &&
-  assert_eq "$(echo "$out" | cut -f1 | tr '\n' ' ')" "init install uninstall list status start stop config sync notifications help " &&
+  assert_eq "$(echo "$out" | cut -f1 | tr '\n' ' ')" "install uninstall list status start stop config sync notifications help " &&
   assert_contains "$out" "$(printf 'sync\tSync the current (or given) repo, or all listed repos')" &&
   assert_not_contains "$out" "__sync-one"
 }
@@ -1652,7 +1680,7 @@ test_hints_install() {
 }
 test_hints_uninstall_watch() {
   assert_eq "$(hints uninstall -r 2>&1)" "$(printf -- '--watch\tStop watching <dir>')" &&
-  gs init >/dev/null && mkdir "$T/p: q" && gs install -r "$T/p: q" --watch >/dev/null &&
+  mkdir "$T/p: q" && gs install -r "$T/p: q" --watch >/dev/null &&
   assert_eq "$(hints uninstall -r)" "$(printf -- '--watch\tStop watching <dir>\n%s\twatched root' "$T/p: q")" &&
   assert_eq "$(hints uninstall -r --watch)" "$(printf '%s\twatched root' "$T/p: q")" &&
   assert_eq "$(hints uninstall -r "$T/p: q")" "$(printf -- '--watch\tStop watching <dir>')" &&
@@ -1661,7 +1689,7 @@ test_hints_uninstall_watch() {
 test_hints_repos() {
   assert_eq "$(hints uninstall 2>&1)" "" &&
   assert_eq "$(hints sync 2>&1 | cut -f1)" "--all" &&
-  gs init >/dev/null && make_repos "sp ace" && gs install "$WORK" >/dev/null &&
+  make_repos "sp ace" && gs install "$WORK" >/dev/null &&
   assert_eq "$(hints uninstall)" "$(printf '%s\tregistered repo' "$WORK")" &&
   out=$(hints sync) &&
   assert_contains "$out" "$(printf -- '--all\tSync every listed repo')" &&
@@ -1707,7 +1735,7 @@ test_hints_notifications() {
 }
 test_hints_zsh_parity() {
   command -v zsh >/dev/null || { echo "    (skipped: no zsh)" >&2; return 0; }
-  gs init >/dev/null && make_repos "sp ace" && gs install "$WORK" >/dev/null &&
+  make_repos "sp ace" && gs install "$WORK" >/dev/null &&
   for args in "" "install" "install -r" "sync" "uninstall" "uninstall -r" "status -v" "config" "config --global sync.mode" "config sync.period" "config --global sync.disableOfflineCheck" "notifications"; do
     assert_eq "$(hints_in zsh $args)" "$(hints_in bash $args)" "args: $args" || return 1
   done
@@ -1732,14 +1760,14 @@ test_bash_complete_install_dirs() {
   assert_eq "$(bash_complete git-sync install -r "")" ""
 }
 test_bash_complete_paths() {
-  gs init >/dev/null && make_repos "a:b c" && gs install "$WORK" >/dev/null &&
+  make_repos "a:b c" && gs install "$WORK" >/dev/null &&
   assert_eq "$(bash_complete git-sync uninstall "$T/a")" "$T/a:b\\ c" &&
   assert_eq "$(bash_complete git-sync uninstall "$T/a:b\\ ")" "b\\ c" &&
   out=$(bash_complete git-sync sync "") &&
   assert_contains "$out" "--all" && assert_contains "$out" "$T/a:b\\ c" && assert_contains "$out" "-- registered repo"
 }
 test_bash_complete_prefix_words() {
-  gs init >/dev/null && make_repos && git clone -q "$T/remote.git" "$T/app" &&
+  make_repos && git clone -q "$T/remote.git" "$T/app" &&
   git clone -q "$T/remote.git" "$T/app2" &&
   gs install "$T/app" >/dev/null && gs install "$T/app2" >/dev/null &&
   out=$(bash_complete git-sync uninstall "$T/ap") &&
@@ -1756,7 +1784,7 @@ test_zsh_completion_registers() {
 }
 test_zsh_complete_frontend() {
   command -v zsh >/dev/null || { echo "    (skipped: no zsh)" >&2; return 0; }
-  gs init >/dev/null && make_repos "a:b c" && gs install "$WORK" >/dev/null &&
+  make_repos "a:b c" && gs install "$WORK" >/dev/null &&
   assert_contains "$(zsh_complete git-sync st)" "describe status:Show agent state and per-repo sync status" &&
   assert_eq "$(zsh_complete git-sync uninstall "")" "describe $T/a\\:b c:registered repo" &&
   out=$(zsh_complete git-sync install "") &&
@@ -1770,14 +1798,14 @@ test_zsh_complete_frontend() {
 }
 test_zsh_tab_inserts() {
   command -v zsh >/dev/null && command -v expect >/dev/null || { echo "    (skipped: no zsh or expect)" >&2; return 0; }
-  gs init >/dev/null && make_repos "a:b c" && gs install "$WORK" >/dev/null &&
+  make_repos "a:b c" && gs install "$WORK" >/dev/null &&
   assert_eq "$(tab_complete zsh "git-sync unin")" "uninstall" &&
   assert_eq "$(tab_complete zsh "git-sync config sync.mode fa" | tr '\n' ' ')" "config sync.mode fast-forward " &&
   assert_eq "$(tab_complete zsh "git-sync uninstall $T/a" | tail -1)" "$T/a:b c"
 }
 test_bash_tab_inserts() {
   command -v expect >/dev/null || { echo "    (skipped: no expect)" >&2; return 0; }
-  gs init >/dev/null && make_repos "a:b c" && gs install "$WORK" >/dev/null &&
+  make_repos "a:b c" && gs install "$WORK" >/dev/null &&
   assert_eq "$(tab_complete bash "git-sync unin")" "uninstall" &&
   assert_eq "$(tab_complete bash "git-sync uninstall $T/a" | tail -1)" "$T/a:b c" &&
   assert_eq "$(tab_complete bash "git-sync uninstall $T/a:" | tail -1)" "$T/a:b c"
@@ -1791,7 +1819,7 @@ test_install_sh_completion() {
   [ -x "$T/bin2/git-sync" ] && cmp -s "$f" "$COMP" &&
   assert_contains "$out" "Installed $f" &&
   assert_contains "$out" "[ -f \"$f\" ] && . \"$f\"" &&
-  assert_contains "$out" "Next: run 'git-sync init'." &&
+  assert_contains "$out" "Next: run 'git-sync install' inside a repo, then 'git-sync start'." &&
   PREFIX="$T/bin2" XDG_DATA_HOME="$T/share" sh "$ROOT/install.sh" >/dev/null &&
   assert_eq "$(ls "$T/share/git-sync")" "git-sync-completion.sh" &&
   out=$(PREFIX="$T/bin3" sh "$ROOT/install.sh") &&

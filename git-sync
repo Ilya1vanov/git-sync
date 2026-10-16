@@ -29,9 +29,6 @@ usage_die() {
 }
 warn() { echo "git-sync: warning: $*" >&2; }
 now() { date +%Y-%m-%dT%H:%M:%S%z; }
-require_init() {
-  [ -f "$GS_CONFIG" ] || die "not initialized; run 'git-sync init'"
-}
 
 # ---- config ----
 cfg_known() {
@@ -267,9 +264,10 @@ status_field() {
   git config -f "$(status_file "$1")" "status.$2" 2>/dev/null
 }
 
-# Appends a log line; never fails the caller.
+# Appends a log line; never fails the caller. Never creates GS_HOME: commands
+# that only read or remove leave a fresh machine untouched.
 log_msg() {
-  mkdir -p "$GS_HOME" 2>/dev/null
+  [ -d "$GS_HOME" ] || return 0
   printf '%s %s %s\n' "$(now)" "$1" "$2" >> "$GS_LOG" 2>/dev/null
   return 0
 }
@@ -1072,7 +1070,6 @@ cmd_help() {
 Usage: git-sync <command> [args]
 
 Commands:
-  init                         Create ~/.git-sync with default config
   install [<path>]             Add a repo (default: current) to the sync list
   install -r <dir>             Add every repo directly inside <dir> (depth 1)
   install -r <dir> --watch     Same, and add new clones in <dir> at every sync --all
@@ -1094,30 +1091,11 @@ EOF
 }
 
 # init_home: create GS_HOME and its status dir, private to the user (logs and
-# status hold repo paths and fetch errors).
+# status hold repo paths and fetch errors). Run by every command that writes
+# there, so an older, looser folder is tightened too.
 init_home() {
   mkdir -p "$GS_STATUS_DIR" || die "cannot create $GS_STATUS_DIR"
-  chmod 700 "$GS_HOME" || die "cannot set permissions of $GS_HOME"
-}
-
-cmd_init() {
-  if [ -f "$GS_CONFIG" ]; then
-    init_home
-    echo "git-sync: already initialized ($GS_HOME)"
-    return 0
-  fi
-  init_home
-  git config -f "$GS_CONFIG" sync.period 20m &&
-  git config -f "$GS_CONFIG" sync.mode fast-forward &&
-  git config -f "$GS_CONFIG" sync.ffCheckedOut false &&
-  git config -f "$GS_CONFIG" sync.jobs 8 &&
-  git config -f "$GS_CONFIG" sync.jitter 5s &&
-  git config -f "$GS_CONFIG" log.maxSize 3M &&
-  git config -f "$GS_CONFIG" notify.enabled false &&
-  git config -f "$GS_CONFIG" notify.events blocked ||
-    die "cannot write $GS_CONFIG"
-  echo "Initialized git-sync in $GS_HOME"
-  echo "Next: run 'git-sync install' inside a repo, then 'git-sync start'."
+  chmod 700 "$GS_HOME" 2>/dev/null || warn "cannot set permissions of $GS_HOME"
 }
 
 cmd_install() {
@@ -1537,6 +1515,7 @@ cmd_config() {
 
   if [ "$unset" -eq 1 ]; then
     if [ "$target" = global ]; then
+      [ -f "$GS_CONFIG" ] || return 0
       git config -f "$GS_CONFIG" --unset "$name"
     else
       git -C "$repo" config --unset "$name"
@@ -1544,6 +1523,7 @@ cmd_config() {
     case $? in 0|5) ;; *) die "cannot unset $key" ;; esac
   else
     if [ "$target" = global ]; then
+      init_home
       git config -f "$GS_CONFIG" "$name" "$val" || die "cannot write $key"
     else
       git -C "$repo" config "$name" "$val" || die "cannot write $key"
@@ -1575,12 +1555,17 @@ cmd_stop() {
 }
 
 cmd_notifications() {
+  local val=
   case "${1:-}" in
     "") ;;
-    enable) git config -f "$GS_CONFIG" notify.enabled true ;;
-    disable) git config -f "$GS_CONFIG" notify.enabled false ;;
+    enable) val=true ;;
+    disable) val=false ;;
     *) usage_die "usage: git-sync notifications [enable|disable]" ;;
   esac
+  if [ -n "$val" ]; then
+    init_home
+    git config -f "$GS_CONFIG" notify.enabled "$val" || die "cannot write notify.enabled"
+  fi
   if [ "$(cfg_get notify.enabled)" = true ]; then
     echo "enabled ($(cfg_get notify.events))"
   else
@@ -1741,12 +1726,10 @@ cmd_status() {
 # ---- dispatch ----
 cmd=${1:-help}
 case "$cmd" in
-  help|-h|--help|init) ;;
-  install|uninstall|list|status|start|stop|config|sync|notifications|__sync-one) require_init ;;
+  install|start|sync) init_home ;;
 esac
 case "$cmd" in
   help|-h|--help) cmd_help ;;
-  init) cmd_init ;;
   install) shift; cmd_install "$@" ;;
   uninstall) shift; cmd_uninstall "$@" ;;
   list) shift; cmd_list "$@" ;;
