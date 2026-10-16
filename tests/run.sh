@@ -853,6 +853,39 @@ test_host_skip_state_of_killed_run_removed() {
   # (the killed run's fetch temp dir is a separate, older leftover)
   assert_eq "$(run_state | grep -v '/fetch\.[0-9]*$')" ""
 }
+# race_stub [AUTH_PATH]: like down_stub, but each call waits (up to 5 s) until both
+# repos' fetches are connecting, then fails; a fetch of AUTH_PATH fails 1 s later with
+# an auth error instead.
+race_stub() {
+  { echo '#!/bin/sh'
+    echo 'echo "$*" >> "$STUB_DIR/ssh.calls"'
+    echo 'i=0; while [ "$(grep -c . "$STUB_DIR/ssh.calls")" -lt 2 ] && [ $i -lt 50 ]; do sleep 0.1; i=$((i+1)); done'
+    [ -z "${1:-}" ] || printf 'case "$*" in *%s*) sleep 1; echo "git@down.invalid: Permission denied (publickey)." >&2; exit 255 ;; esac\n' "$1"
+    echo "echo 'ssh: connect to host down.invalid port 22: Connection refused' >&2; exit 255"
+  } > "$T/bin/ssh"
+  chmod +x "$T/bin/ssh"
+}
+test_host_skip_parallel_race_one_blocker() {
+  two_on_down_host && race_stub && gs config --global sync.jobs 2 || return 1
+  out=$(gs_ssh sync --all 2>&1); rc=$?
+  assert_eq $rc 1 &&
+  assert_eq "$(sshcalls)" 2 &&
+  assert_eq "$(allof "$WORK" blocker; allof "$T/r 2" blocker)" \
+    "fetch-failed:origin ssh: connect to host down.invalid port 22: Connection refused" &&
+  assert_eq "$(allof "$WORK" note; allof "$T/r 2" note)" "origin: skipped (host down.invalid unreachable)" &&
+  assert_eq "$({ sget "$WORK" result; sget "$T/r 2" result; } | sort | paste -sd' ' -)" "blocked ok" &&
+  assert_eq "$(run_state)" ""
+}
+test_host_skip_parallel_auth_failure_still_blocks() {
+  two_on_down_host && race_stub y.git && gs config --global sync.jobs 2 || return 1
+  quiet gs_ssh sync --all
+  assert_eq "$(sshcalls)" 2 &&
+  assert_eq "$(allof "$WORK" blocker)" \
+    "fetch-failed:origin ssh: connect to host down.invalid port 22: Connection refused" &&
+  assert_eq "$(allof "$T/r 2" blocker)" \
+    "fetch-failed:origin git@down.invalid: Permission denied (publickey)." &&
+  assert_eq "$(allof "$WORK" note; allof "$T/r 2" note)" ""
+}
 
 ffsetup() { gs init >/dev/null && make_repos "$@" && gs install "$WORK" >/dev/null; }
 blockers() { git config -f "$(sf_of "$WORK")" --get-all status.blocker; }
