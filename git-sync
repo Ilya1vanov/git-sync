@@ -839,7 +839,7 @@ sync_repo() {
     fi
   fi
   if [ "$listed" = 1 ]; then
-    SYNC_PREV_KEYS=$(git config -f "$(status_file "$repo")" --get-all status.blocker 2>/dev/null | awk '{print $1}')
+    SYNC_PREV_KEYS=$(prev_blocker_keys "$(status_file "$repo")")
     status_write "$repo" "$mode"
   fi
   log_msg INFO "$repo: $SYNC_RESULT"
@@ -977,6 +977,15 @@ notify_wanted() {
 # collects; notify_run_end sends.
 NOTIFY_NEW_BLOCKED=   # "; "-separated "<repo>: <key>, <key>"
 NOTIFY_NEW_COUNT=0
+
+# prev_blocker_keys STATUS_FILE: the blocker keys of a repo's previous run, one
+# per line. A host skip of <remote> counts as fetch-failed:<remote>, so an outage
+# whose blocker moves to another repo between runs is not "newly blocked".
+prev_blocker_keys() {
+  git config -f "$1" --get-all status.blocker 2>/dev/null | awk '{print $1}'
+  git config -f "$1" --get-all status.note 2>/dev/null |
+    sed -n 's/^\(.*\): skipped (host .* unreachable)$/fetch-failed:\1/p'
+}
 
 # new_blocker_keys: comma-separated blocker keys of the repo just synced that
 # were not in its previous status file (SYNC_PREV_KEYS); empty if none.

@@ -310,7 +310,10 @@ git-sync notifications            # show current state
 ```
 
 Events: `finished` (counts of ok/blocked/failed), `blocked` (a repo gained a
-blocker it did not have in its previous run). A run sends at most one
+blocker it did not have in its previous run). For this, a host skip of
+`<remote>` in the previous run counts as `fetch-failed:<remote>`: during an
+outage spanning several runs, whichever repo hits the unreachable host first
+takes the blocker, and that move alone does not notify again. A run sends at most one
 notification, at its end, combining both: e.g. title
 `git-sync: 2 repos newly blocked`, message
 `api: develop:dirty; web: fetch-failed:origin — 40 repos: 38 ok, 2 blocked, 0 failed`.

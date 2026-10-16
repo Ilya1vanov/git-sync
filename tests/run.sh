@@ -913,6 +913,28 @@ fetch-failed:origin
 fetch-failed:second" &&
   assert_eq "$(allof "$WORK" note; allof "$T/r 2" note)" ""
 }
+test_host_skip_outage_not_renotified() {
+  two_on_down_host && down_stub && gs config --global sync.jobs 1 &&
+  gs notifications enable >/dev/null || return 1
+  quiet gs_ssh sync --all --job
+  assert_eq "$(ncalls)" "git-sync: work|fetch-failed:origin" || return 1
+  # run 2: "r 2" hits the host first and takes the blocker, work is host-skipped
+  git config -f "$GIT_SYNC_HOME/config" --unset-all sync.repo &&
+  git config -f "$GIT_SYNC_HOME/config" --add sync.repo "$T/r 2" &&
+  git config -f "$GIT_SYNC_HOME/config" --add sync.repo "$WORK" && rm -f "$T/notify.calls" || return 1
+  quiet gs_ssh sync --all --job
+  assert_eq "$(allof "$T/r 2" blocker | awk '{print $1}')" "fetch-failed:origin" &&
+  assert_eq "$(allof "$WORK" note)" "origin: skipped (host down.invalid unreachable)" &&
+  assert_eq "$(ncalls)" ""
+}
+test_host_skip_new_fetch_failed_still_notifies() {
+  two_on_down_host && down_stub && gs config --global sync.jobs 1 &&
+  gs notifications enable >/dev/null || return 1
+  quiet gs_ssh sync --all --job && rm -f "$T/notify.calls"
+  git -C "$T/r 2" remote add dead "$T/nope.git" || return 1
+  quiet gs_ssh sync --all --job
+  assert_eq "$(ncalls)" "git-sync: r 2|fetch-failed:dead"
+}
 
 ffsetup() { gs init >/dev/null && make_repos "$@" && gs install "$WORK" >/dev/null; }
 blockers() { git config -f "$(sf_of "$WORK")" --get-all status.blocker; }
