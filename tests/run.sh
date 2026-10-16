@@ -811,7 +811,8 @@ test_host_skip_second_remote_same_repo() {
   git -C "$WORK" remote add second "git@down.invalid:org/z.git" &&
   push_commit develop d2 && down_stub || return 1
   out=$(cd "$WORK" && gs_ssh sync 2>&1); rc=$?
-  assert_eq $rc 1 && assert_eq "$out" "$WORK: blocked (fetch-failed:origin)" &&
+  assert_eq $rc 1 && assert_eq "$out" "$WORK: blocked (fetch-failed:origin)
+down.invalid: unreachable, 1 remote skipped" &&
   assert_eq "$(notes)" "second: skipped (host down.invalid unreachable)" &&
   assert_eq "$(sshcalls)" 1 &&
   assert_eq "$(git -C "$WORK" rev-parse develop)" "$(git -C "$T/remote.git" rev-parse develop)" &&
@@ -945,6 +946,42 @@ test_host_skip_parallel_auth_failure_still_blocks() {
   assert_eq "$(allof "$T/r 2" blocker)" \
     "fetch-failed:origin git@down.invalid: Permission denied (publickey)." &&
   assert_eq "$(allof "$WORK" note; allof "$T/r 2" note)" ""
+}
+test_host_report_manual_run() {
+  two_on_down_host && down_stub && gs config --global sync.jobs 1 || return 1
+  out=$(gs_ssh sync --all 2>&1)
+  assert_eq "$(printf '%s\n' "$out" | tail -1)" "down.invalid: unreachable, 1 remote skipped" &&
+  assert_eq "$(printf '%s\n' "$out" | grep -c unreachable)" 1 &&
+  assert_eq "$(grep -c 'WARN down.invalid: unreachable, 1 remote skipped$' "$GIT_SYNC_HOME/git-sync.log")" 1
+}
+test_host_report_plural_and_job_quiet() {
+  two_on_down_host && down_stub && gs config --global sync.jobs 1 &&
+  git -C "$WORK" remote add second "git@down.invalid:org/z.git" || return 1
+  out=$(gs_ssh sync --all 2>&1)
+  assert_eq "$(printf '%s\n' "$out" | tail -1)" "down.invalid: unreachable, 2 remotes skipped" &&
+  out=$(gs_ssh sync --all --job 2>&1)
+  assert_eq "$out" ""
+}
+test_host_report_finished_notification() {
+  two_on_down_host && down_stub && gs config --global sync.jobs 1 &&
+  gs notifications enable >/dev/null && gs config --global notify.events finished || return 1
+  quiet gs_ssh sync --all --job
+  assert_eq "$(ncalls)" "git-sync|2 repos: 1 ok, 1 blocked, 0 failed; down.invalid unreachable (1 skipped)" &&
+  gs config --global notify.events blocked && rm -f "$T/notify.calls" &&
+  rm -rf "$GIT_SYNC_HOME/status" || return 1
+  quiet gs_ssh sync --all --job
+  assert_contains "$(ncalls)" "fetch-failed:origin" &&
+  assert_eq "$(ncalls | grep -c unreachable)" 0
+}
+test_host_report_none_without_skips() {
+  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null && down_stub &&
+  git -C "$WORK" remote set-url origin "ssh://down.invalid/x.git" &&
+  gs notifications enable >/dev/null && gs config --global notify.events finished || return 1
+  out=$(gs_ssh sync --all 2>&1)
+  assert_eq "$out" "$WORK: blocked (fetch-failed:origin)" &&
+  quiet gs_ssh sync --all --job &&
+  assert_eq "$(ncalls)" "git-sync|1 repos: 0 ok, 1 blocked, 0 failed" &&
+  assert_eq "$(grep -c unreachable "$GIT_SYNC_HOME/git-sync.log")" 0
 }
 test_host_skip_outage_not_renotified() {
   two_on_down_host && down_stub && gs config --global sync.jobs 1 &&

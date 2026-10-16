@@ -239,6 +239,18 @@ are two. ssh aliases are not resolved, so each alias is its own host. Local
 paths, `file://` URLs, `<transport>::` helper URLs and anything else have no
 host: they are never grouped and are fetched as usual.
 
+At the end of the run, each unreachable host with at least one host skip is
+reported once: a manual run prints, after the per-repo lines,
+
+```
+github.com: unreachable, 1 remote skipped
+gitlab.corp: unreachable, 3 remotes skipped
+```
+
+the log gets the same text as a WARN line, and a job run's `finished`
+notification appends `; <host> unreachable (N skipped)` per host. A host whose
+only failure is the one blocker (no skips) is not reported.
+
 ## Maintenance
 
 After each sync, in every mode, git-sync runs
@@ -317,6 +329,8 @@ takes the blocker, and that move alone does not notify again. A run sends at mos
 notification, at its end, combining both: e.g. title
 `git-sync: 2 repos newly blocked`, message
 `api: develop:dirty; web: fetch-failed:origin — 40 repos: 38 ok, 2 blocked, 0 failed`.
+With `finished`, each unreachable host that caused [host skips](#host-skips) is
+appended to the counts: `40 repos: 38 ok, 2 blocked, 0 failed; github.com unreachable (5 skipped)`.
 A legacy `start` in `notify.events` is ignored.
 
 Delivery uses `osascript`, so notifications appear as coming from "Script
