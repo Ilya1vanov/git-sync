@@ -25,7 +25,8 @@ git-sync runs as you, with your credentials. It does not sandbox git.
 - **Credentials.** git-sync only fetches, but it uses your normal ssh keys
   and credential helpers. Fetches never prompt: `GIT_TERMINAL_PROMPT=0` and,
   unless you set your own ssh command, ssh `BatchMode=yes`.
-- **Local files.** `~/.git-sync` (mode 700 after `git-sync init`) holds repo
+- **Local files.** `~/.git-sync` (set to mode 700 by `install`, `start`, `sync` and
+  settings changes; a warning is printed if that fails) holds repo
   paths and the first line of fetch errors. git redacts `user:password@` from
   URLs in those errors, but avoid credentials in remote URLs anyway.
 - **Environment.** `GIT_SYNC_*` variables (for example

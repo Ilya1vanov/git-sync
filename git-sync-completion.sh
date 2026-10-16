@@ -7,14 +7,14 @@
 # __git_sync_hint WORD DESC: prints one candidate line.
 __git_sync_hint() { printf '%s\t%s\n' "$1" "$2"; }
 
-# __git_sync_repos: one candidate per registered repo; silent if not initialized.
+# __git_sync_repos: one candidate per registered repo; silent if there is no config yet.
 __git_sync_repos() {
   local r
   git config -f "${GIT_SYNC_HOME:-$HOME/.git-sync}/config" --get-all sync.repo 2>/dev/null |
     while IFS= read -r r; do __git_sync_hint "$r" "registered repo"; done
 }
 
-# __git_sync_roots: one candidate per watched root; silent if not initialized.
+# __git_sync_roots: one candidate per watched root; silent if there is no config yet.
 __git_sync_roots() {
   local r
   git config -f "${GIT_SYNC_HOME:-$HOME/.git-sync}/config" --get-all sync.root 2>/dev/null |
@@ -87,7 +87,6 @@ __git_sync_values() {
 __git_sync_hints() {
   local cmd a key= npos=0 has_unset=0
   if [ $# -eq 0 ]; then
-    __git_sync_hint init "Create ~/.git-sync with default config"
     __git_sync_hint install "Add a repo (default: current) to the sync list"
     __git_sync_hint uninstall "Remove a repo from the sync list"
     __git_sync_hint list "List synced repos"

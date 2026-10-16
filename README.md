@@ -14,7 +14,6 @@ dependencies.
 ```sh
 sh install.sh          # copies git-sync to ${PREFIX:-$HOME/.local/bin}
                        #   and its completion to ~/.local/share/git-sync
-git-sync init          # creates ~/.git-sync with default config
 cd /path/to/repo
 git-sync install       # register the repo (repeat per repo)
 git-sync install -r ~/projects   # or: register every repo directly inside a folder
@@ -151,7 +150,7 @@ Only watch folders where you clone repos you trust.
 ## Commands
 
 ```
-git-sync init | install [<path>] | install -r <dir> [--watch] | uninstall [<path>] | list [--watch]
+git-sync install [<path>] | install -r <dir> [--watch] | uninstall [<path>] | list [--watch]
 git-sync uninstall -r <dir> --watch
 git-sync status [--verbose] [--list-order]
 git-sync start | stop
@@ -307,8 +306,14 @@ Offline:       skipped since <first skip> (last <latest skip>)
 
 The line disappears after the next run that actually syncs.
 
-Files under `~/.git-sync` (override with `GIT_SYNC_HOME`; `init` sets the
-folder to mode 700, so re-run `git-sync init` to tighten an older install):
+Files under `~/.git-sync` (override with `GIT_SYNC_HOME`). There is no setup
+step: the folder is created on first use by a command that writes there
+(`install`, `start`, `sync`, or setting a value with `config` or
+`notifications`), and each of them sets it to mode 700, tightening an older
+install (if that fails, e.g. on a filesystem without Unix permissions, it
+warns and carries on). Commands that only read or remove (`list`, `status`,
+`config`, `uninstall`, `stop`) never create or tighten it. The config file holds only values you
+set; everything else uses the defaults.
 
 | Path | Content |
 |---|---|

@@ -17,4 +17,4 @@ put "$SRC_DIR/git-sync-completion.sh" "$HINTS_FILE" 644
 echo "Installed $HINTS_FILE"
 echo "Optional completion: add this line to ~/.bashrc, or to ~/.zshrc after compinit:"
 echo "  [ -f \"$HINTS_FILE\" ] && . \"$HINTS_FILE\""
-echo "Next: run 'git-sync init'."
+echo "Next: run 'git-sync install' inside a repo, then 'git-sync start'."
