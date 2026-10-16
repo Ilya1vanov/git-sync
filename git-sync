@@ -133,7 +133,7 @@ parse_size() {
 }
 
 validate_value() {
-  local key=$1 v=$2 w
+  local key=$1 v=$2 w min
   case "$v" in
     *"
 "*) echo "git-sync: value must be a single line" >&2; return 1 ;;
@@ -151,9 +151,15 @@ validate_value() {
         echo "git-sync: sync.fetchTimeout must look like 5m, 90, 1h or 45s" >&2; return 1
       fi
       w=$(parse_period "$v")
-      # GIT_SYNC_FETCH_TIMEOUT_MIN: test hook lowering the minimum
-      if [ "$w" -lt "${GIT_SYNC_FETCH_TIMEOUT_MIN:-30}" ] || [ "$w" -gt 3600 ]; then
-        echo "git-sync: sync.fetchTimeout must be from ${GIT_SYNC_FETCH_TIMEOUT_MIN:-30}s to 3600s" >&2; return 1
+      # GIT_SYNC_FETCH_TIMEOUT_MIN: test hook lowering the minimum; ignored
+      # unless a positive integer
+      min=30
+      case "${GIT_SYNC_FETCH_TIMEOUT_MIN:-}" in
+        ''|0*|*[!0-9]*) ;;
+        *) min=$GIT_SYNC_FETCH_TIMEOUT_MIN ;;
+      esac
+      if [ "$w" -lt "$min" ] || [ "$w" -gt 3600 ]; then
+        echo "git-sync: sync.fetchTimeout must be from ${min}s to 3600s" >&2; return 1
       fi ;;
     sync.mode)
       case "$v" in
@@ -370,19 +376,22 @@ sig_resume() {
   [ -z "$GS_SIG_PENDING" ] || "$GS_SIG_HANDLER"
 }
 
-# Poll interval (seconds) of wait_gone.
+# Poll interval of wait_gone: GS_POLL seconds, i.e. GS_POLL_HZ polls a second.
 GS_POLL=0.2
+GS_POLL_HZ=5
 
-# wait_gone SECS TARGET...: wait up to SECS seconds until no TARGET (a pid, or
-# -pgid for a process group) is alive. Returns 1 if some still is.
+# wait_gone SECS TARGET...: wait at least SECS seconds (counted in polls, each
+# a full GS_POLL sleep) until no TARGET (a pid, or -pgid for a process group)
+# is alive. Returns 1 if some still is.
 wait_gone() {
-  local end t alive
-  end=$(( $(date +%s) + $1 )); shift
+  local n t alive
+  n=$(( $1 * GS_POLL_HZ )); shift
   while :; do
     alive=
     for t in "$@"; do kill -0 "$t" 2>/dev/null && alive=1; done
     [ -n "$alive" ] || return 0
-    [ "$(date +%s)" -lt "$end" ] || return 1
+    [ "$n" -gt 0 ] || return 1
+    n=$((n - 1))
     sleep "$GS_POLL"
   done
 }
@@ -400,14 +409,34 @@ group_reap() {
   wait_gone "$2" -"$1" || kill -KILL -"$1" 2>/dev/null
 }
 
+# tree_kill PID...: KILL each PID and all its descendants. Each level is
+# stopped before its children are listed, so none forks unseen; a descendant
+# leading its own process group (a fetch, a sleeper) is killed by group.
+tree_kill() {
+  local all= level="$*" next p
+  while [ -n "$level" ]; do
+    kill -STOP $level 2>/dev/null
+    all="$all $level"
+    next=
+    for p in $level; do next="$next $(pgrep -P "$p")"; done
+    level=$(echo $next)
+  done
+  for p in $all; do
+    [ "$(ps -o pgid= -p "$p" 2>/dev/null | tr -d ' ')" != "$p" ] || kill -KILL -"$p" 2>/dev/null
+  done
+  kill -KILL $all 2>/dev/null
+}
+
 # PID of the xargs running parallel `sync --all` workers; empty otherwise.
 GS_XARGS_PID=
 
 # run_interrupted: INT/TERM handler of a run. Stops the inline fetch, then
 # xargs (frozen first so it starts no new worker) and every worker it started.
-# Each worker stops its own fetch within GS_ABORT_GRACE; stragglers are killed
-# after that, and temp dirs of workers that died uncleanly are removed (the
-# run holds the lock, so no other run owns them). Exiting releases the lock.
+# Each worker stops its own fetch within GS_ABORT_GRACE (plus polling); the
+# run waits 2s longer than that, then kills stragglers (a worker stuck in a
+# foreground command defers its trap) with all their descendants, and removes
+# temp dirs of workers that died uncleanly (the run holds the lock, so no
+# other run owns them). Exiting releases the lock.
 run_interrupted() {
   local workers
   fetch_abort
@@ -417,8 +446,8 @@ run_interrupted() {
     [ -z "$workers" ] || kill -TERM $workers 2>/dev/null
     kill -TERM "$GS_XARGS_PID" 2>/dev/null
     kill -CONT "$GS_XARGS_PID" 2>/dev/null
-    if [ -n "$workers" ] && ! wait_gone $((GS_ABORT_GRACE + 1)) $workers; then
-      kill -KILL $workers 2>/dev/null
+    if [ -n "$workers" ] && ! wait_gone $((GS_ABORT_GRACE + 2)) $workers; then
+      tree_kill $workers
     fi
     rm -rf "$GS_HOME"/fetch.*
   fi
@@ -577,20 +606,34 @@ GS_ABORT_GRACE=2
 # is on only while starting them), so signals reach every descendant (ssh,
 # credential helpers, proxies). On timeout the sleeper touches TMPDIR/timeout
 # and reaps the fetch's group (group_reap, GS_FETCH_GRACE); it does nothing if
-# this process is gone by then, as the pgid may have been reused. Returns
-# git's exit status; stderr goes to TMPDIR/err. `wait` stderr is discarded to
-# hide job-control notices.
+# this process is gone by then, as the pgid may have been reused. With a
+# controlling terminal (manual runs), a prompt on it (ssh without BatchMode,
+# a credential helper) stops the background group: the sleeper then checks
+# once a second (one `ps`) and, on a stopped member, touches TMPDIR/stopped
+# and reaps the group the same way. Returns git's exit status; stderr goes to
+# TMPDIR/err. `wait` stderr is discarded to hide job-control notices.
 fetch_bounded() {
   local repo=$1 r=$2 secs=$3 d=$4 rc
-  rm -f "$d/timeout"
+  rm -f "$d/timeout" "$d/stopped"
   sig_defer
   set -m
   LC_ALL=C git -c http.lowSpeedLimit=1000 -c http.lowSpeedTime=60 -C "$repo" fetch --prune --quiet "$r" >/dev/null 2>"$d/err" &
   GS_FETCH_PGID=$!
   (
-    sleep "$secs"
+    cut=timeout
+    if { : </dev/tty; } 2>/dev/null; then
+      while [ "$secs" -gt 0 ]; do
+        sleep 1
+        secs=$((secs - 1))
+        if ps -o stat= -g "$GS_FETCH_PGID" 2>/dev/null | grep -q '^T'; then
+          cut=stopped; break
+        fi
+      done
+    else
+      sleep "$secs"
+    fi
     kill -0 "$$" 2>/dev/null || exit 0
-    : > "$d/timeout"
+    : > "$d/$cut"
     group_reap "$GS_FETCH_PGID" "$GS_FETCH_GRACE"
     exit 0
   ) </dev/null >/dev/null 2>&1 &
@@ -600,7 +643,7 @@ fetch_bounded() {
   wait "$GS_FETCH_PGID" 2>/dev/null
   rc=$?
   # Sleeper fired: let it finish the grace/KILL sequence. Otherwise stop it.
-  [ -e "$d/timeout" ] || kill -TERM -"$GS_SLEEPER_PGID" 2>/dev/null
+  [ -e "$d/timeout" ] || [ -e "$d/stopped" ] || kill -TERM -"$GS_SLEEPER_PGID" 2>/dev/null
   wait "$GS_SLEEPER_PGID" 2>/dev/null
   GS_FETCH_PGID=
   GS_SLEEPER_PGID=
@@ -617,7 +660,7 @@ fetch_abort() {
 }
 
 sync_fetch() {
-  local repo=$1 remotes r err limit secs d host
+  local repo=$1 remotes r err limit secs d host rc
   remotes=$(git -C "$repo" remote 2>/dev/null)
   [ -n "$remotes" ] || return 0
   limit=$(cfg_get sync.fetchTimeout "$repo")
@@ -630,12 +673,13 @@ sync_fetch() {
     if [ -n "$host" ] && host_unreachable "$host"; then
       host_skip "$host" "$r"
     else
-      if fetch_bounded "$repo" "$r" "$secs" "$d"; then
-        [ -e "$d/timeout" ] || continue
-      fi
+      fetch_bounded "$repo" "$r" "$secs" "$d"
+      rc=$?
       if [ -e "$d/timeout" ]; then
         add_blocker "fetch-timeout:$r" "timed out after $limit"
-      else
+      elif [ -e "$d/stopped" ]; then
+        add_blocker "fetch-failed:$r" "stopped waiting for terminal input"
+      elif [ "$rc" -ne 0 ]; then
         err=$(cat "$d/err" 2>/dev/null)
         # only the worker that creates the host's marker keeps the blocker; a
         # connection failure that loses that race becomes a host skip
@@ -644,6 +688,8 @@ sync_fetch() {
         else
           add_blocker "fetch-failed:$r" "$(first_line "$err")"
         fi
+      else
+        continue
       fi
     fi
     SYNC_FAILED_REMOTES="${SYNC_FAILED_REMOTES:+$SYNC_FAILED_REMOTES }$r"

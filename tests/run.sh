@@ -261,6 +261,14 @@ test_config_fetch_timeout_min_test_hook() {
   GIT_SYNC_FETCH_TIMEOUT_MIN=10 gs config --global sync.fetchTimeout 10 &&
   { gs config --global sync.fetchTimeout 3601 2>/dev/null; [ $? -ne 0 ]; }
 }
+test_config_fetch_timeout_min_test_hook_ignored_unless_positive_integer() {
+  for m in abc 0 -5 1.5 ""; do
+    { GIT_SYNC_FETCH_TIMEOUT_MIN=$m gs config --global sync.fetchTimeout 29 2>"$T/err"; [ $? -ne 0 ]; } &&
+    assert_eq "$(cat "$T/err")" "git-sync: sync.fetchTimeout must be from 30s to 3600s" &&
+    GIT_SYNC_FETCH_TIMEOUT_MIN=$m gs config --global sync.fetchTimeout 30 2>"$T/err" &&
+    assert_eq "$(cat "$T/err")" "" || { echo "    (hook [$m])"; return 1; }
+  done
+}
 test_config_fetch_timeout_repo_override() {
   make_repos && gs config --global sync.fetchTimeout 2m &&
   cd "$WORK" &&
@@ -722,6 +730,45 @@ test_fetch_timeout_kill_escalation() {
   assert_eq "$(blockers)" "fetch-timeout:origin timed out after 1" &&
   assert_eq "$(marked)" ""
 }
+# ms: wall clock in milliseconds.
+ms() { perl -MTime::HiRes=time -e 'printf "%d\n", time * 1000'; }
+test_fetch_timeout_kill_grace_is_full() {
+  # 3s: the fake ssh must be up (trap set) when the timeout fires, even under load
+  make_repos && gs install "$WORK" >/dev/null && gs config --global sync.fetchTimeout 3 &&
+  git -C "$WORK" remote set-url origin "ssh://example.invalid/x.git" || return 1
+  # fake ssh that ignores TERM and records when it got it; KILL ends the fetch
+  cat > "$T/bin/ssh" <<'EOF'
+#!/bin/sh
+ms() { perl -MTime::HiRes=time -e 'printf "%d\n", time * 1000'; }
+trap 'ms > "$STUB_DIR/t.$$" && mv "$STUB_DIR/t.$$" "$STUB_DIR/term.ms"' TERM
+while :; do sleep 1 & wait $!; done
+EOF
+  chmod +x "$T/bin/ssh" || return 1
+  ( cd "$WORK" && quiet gs_ssh sync ) &&
+  end=$(ms) && term=$(cat "$T/term.ms" 2>/dev/null) && [ -n "$term" ] ||
+    { echo "    fake ssh never got TERM"; return 1; }
+  # GS_FETCH_GRACE (5s) is a minimum: the KILL never comes sooner
+  [ $((end - term)) -ge 5000 ] || { echo "    KILL $((end - term))ms after TERM"; return 1; }
+  assert_eq "$(marked)" ""
+}
+test_fetch_stopped_on_terminal_input_fails_early() {
+  command -v expect >/dev/null || { echo "    (skipped: no expect)" >&2; return 0; }
+  make_repos && gs install "$WORK" >/dev/null && gs config --global sync.fetchTimeout 53 &&
+  git -C "$WORK" remote set-url origin "ssh://example.invalid/x.git" || return 1
+  # fake ssh prompting on the terminal, like ssh without BatchMode
+  printf '#!/bin/sh\nprintf "Password: " >/dev/tty; read x </dev/tty; exit 1\n' > "$T/bin/ssh" &&
+  chmod +x "$T/bin/ssh" &&
+  printf 'set timeout 30\nspawn -noecho {*}$argv\nexpect eof\n' > "$T/tty.exp" || return 1
+  start=$(date +%s)
+  # a manual run from a terminal: the fetch's background group stops on the read
+  ( unset GIT_SSH_COMMAND GIT_SSH; PATH="$T/bin:$PATH"; cd "$WORK" &&
+    expect -f "$T/tty.exp" "$GS" sync ) > "$T/tty.out" 2>&1
+  el=$(( $(date +%s) - start ))
+  assert_contains "$(cat "$T/tty.out")" "$WORK: blocked (fetch-failed:origin)" &&
+  assert_eq "$(blockers)" "fetch-failed:origin stopped waiting for terminal input" &&
+  [ "$el" -lt 15 ] || { echo "    took ${el}s"; return 1; }
+  assert_eq "$(marked 53)" ""
+}
 # poll TENTHS CONDITION: re-evaluates CONDITION every 0.1s; fails after TENTHS tries.
 poll() {
   local n=0
@@ -743,7 +790,7 @@ interrupted_run() {
   set -m; gs_ssh "$@" > "$T/int.out" 2>&1 & pid=$!; set +m
   poll 100 "$ready" || { echo "    never ready: $ready"; kill -KILL -"$pid"; return 1; }
   if [ "$sig" = INT ]; then kill -INT -"$pid"; else kill -TERM "$(cat "$GIT_SYNC_HOME/lock/pid")"; fi
-  poll 50 '! kill -0 "$pid" 2>/dev/null' || { echo "    run still alive after $sig"; kill -KILL -"$pid"; return 1; }
+  poll 80 '! kill -0 "$pid" 2>/dev/null' || { echo "    run still alive after $sig"; kill -KILL -"$pid"; return 1; }
   wait "$pid" 2>/dev/null; rc=$?
   [ "$rc" -ne 0 ] || { echo "    interrupted run exited 0"; return 1; }
   poll 30 '[ -z "$(leftovers)" ]' || { echo "    leaked: $(leftovers | tr '\n' ' ')"; kill -KILL $(leftovers) 2>/dev/null; return 1; }
@@ -802,6 +849,18 @@ test_interrupt_during_jitter_is_prompt() {
   gs config --global sync.mode maintain-only || return 1
   for sig in TERM INT; do
     interrupted_run '[ -n "$(pgrep -fx "sleep [0-9]+\.[0-9][0-9]")" ]' "$sig" sync --all || { echo "    ($sig)"; return 1; }
+  done
+}
+test_interrupt_kills_foreground_child_of_stuck_worker() {
+  make_repos && gs install "$WORK" >/dev/null && hang_stub &&
+  gs config --global sync.mode maintain-only || return 1
+  # `git maintenance run` hangs (as the fake ssh); a worker defers TERM while
+  # it runs, so the run has to kill it and its child
+  real=$(command -v git) &&
+  printf '#!/bin/sh\ncase " $* " in *" maintenance run "*) exec "%s" ;; esac\nexec "%s" "$@"\n' \
+    "$T/bin/ssh" "$real" > "$T/bin/git" && chmod +x "$T/bin/git" || return 1
+  for sig in TERM INT; do
+    interrupted_run 'fetches 1' "$sig" sync --all || { echo "    ($sig)"; return 1; }
   done
 }
 test_interrupt_removes_fetch_dir_of_killed_worker() {

@@ -197,7 +197,7 @@ Result per repo: `ok`, `blocked` (at least one blocker), `error`, `missing`
 | `<branch>:in-progress` | Merge, rebase, cherry-pick, revert or bisect in that worktree (`ffCheckedOut=true`). |
 | `<branch>:diverged` | Local branch is both ahead of and behind its upstream, so it cannot fast-forward. (Ahead only is a note, not a blocker.) |
 | `<branch>:ff-failed` | Git refused the fast-forward (for example mid-rebase, an untracked file in the way, `index.lock`). |
-| `fetch-failed:<remote>` | `git fetch` failed for that remote. Branches tracking it are skipped. On a connection error, later remotes on the same host get a [host skip](#host-skips) note instead. |
+| `fetch-failed:<remote>` | `git fetch` failed for that remote. Branches tracking it are skipped. On a connection error, later remotes on the same host get a [host skip](#host-skips) note instead. In a manual run from a terminal, a fetch that prompts on the terminal (ssh without `BatchMode`, a credential helper) is stopped within about a second, with the detail `stopped waiting for terminal input`. |
 | `fetch-timeout:<remote>` | A fetch from that remote ran longer than `sync.fetchTimeout` and was stopped. Branches tracking it are skipped. |
 | `maintenance:failed` | `git maintenance run` failed. |
 | `repo:invalid` | The path exists but is not a git repository (result `error`). |
