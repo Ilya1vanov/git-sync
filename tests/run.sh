@@ -564,6 +564,37 @@ test_offline_lock_held_reports_in_progress() {
   assert_eq $rc 0 && assert_eq "$out" "another run in progress" && assert_no_file "$T/route.calls" &&
   cmp -s "$GIT_SYNC_HOME/state" "$T/state.before"
 }
+test_offline_route_missing_not_offline() {
+  make_repos && gs install "$WORK" >/dev/null && export GIT_SYNC_ROUTE="$T/no such/route" || return 1
+  out=$(gs sync --all 2>&1); rc=$?
+  assert_eq $rc 0 && assert_not_contains "$out" offline && assert_eq "$(sget "$WORK" result)" ok &&
+  assert_contains "$(cat "$GIT_SYNC_HOME/git-sync.log")" "WARN offline check failed"
+}
+test_offline_route_path_with_spaces() {
+  make_repos && gs install "$WORK" >/dev/null && mkdir "$T/my bin" &&
+  cp "$T/bin/route" "$T/my bin/route" && export GIT_SYNC_ROUTE="$T/my bin/route" && touch "$T/offline" || return 1
+  out=$(gs sync --all 2>&1); rc=$?
+  assert_eq $rc 1 && assert_eq "$out" offline && assert_file "$T/route.calls"
+}
+test_offline_streak_kept_when_nothing_synced() {
+  gs config --global sync.mode maintain-only && make_repos && mkdir "$T/gone" && git init -q "$T/gone" &&
+  gs install "$T/gone" >/dev/null && rm -rf "$T/gone" &&
+  git config -f "$GIT_SYNC_HOME/state" offline.since 2000-01-01T00:00:00+0000 &&
+  git config -f "$GIT_SYNC_HOME/state" offline.lastSkip 2000-01-02T00:00:00+0000 || return 1
+  quiet "$GS" sync --all
+  assert_eq "$(streak_get since)" 2000-01-01T00:00:00+0000
+}
+test_offline_status_without_last_skip() {
+  mkdir -p "$GIT_SYNC_HOME" && git config -f "$GIT_SYNC_HOME/state" offline.since 2000-01-01T00:00:00+0000 || return 1
+  assert_contains "$(gs status)" \
+    "Offline:       skipped since 2000-01-01T00:00:00+0000 (last 2000-01-01T00:00:00+0000)"
+}
+test_offline_streak_write_failure_warns() {
+  make_repos && gs install "$WORK" >/dev/null && mkdir "$GIT_SYNC_HOME/state" && touch "$T/offline" || return 1
+  out=$(gs sync --all 2>&1); rc=$?
+  assert_eq $rc 1 && assert_contains "$out" offline &&
+  assert_contains "$(cat "$GIT_SYNC_HOME/git-sync.log")" "WARN cannot record offline streak"
+}
 test_offline_all_maintain_only_not_checked() {
   make_repos &&
   git clone -q "$T/remote.git" "$T/sec ond:repo" && (cd "$T/sec ond:repo" && gs config sync.mode maintain-only) &&

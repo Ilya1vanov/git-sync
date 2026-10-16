@@ -14,7 +14,7 @@ GS_AGENTS_DIR=${GIT_SYNC_AGENTS_DIR:-$HOME/Library/LaunchAgents}
 GS_LABEL=com.git-sync.agent
 GS_PLIST="$GS_AGENTS_DIR/$GS_LABEL.plist"
 GS_LAUNCHCTL=${GIT_SYNC_LAUNCHCTL:-launchctl}
-GS_ROUTE=${GIT_SYNC_ROUTE:-route}
+GS_ROUTE=${GIT_SYNC_ROUTE:-/sbin/route}
 # Caller's original GIT_SSH_COMMAND (set-ness and value), restored per repo by git_env_for.
 GS_ORIG_SSH_SET=${GIT_SSH_COMMAND+set}
 GS_ORIG_SSH_CMD=${GIT_SSH_COMMAND-}
@@ -283,16 +283,25 @@ log_rotate() {
   return 0
 }
 
-# Offline check: online iff a default route exists. Local routing table only (-n: no DNS).
-is_online() {
-  $GS_ROUTE -n get default >/dev/null 2>&1
+# Offline check: rc 1 only if there is no default route. Local routing table only
+# (-n: no DNS). A route binary that cannot run counts as a route, so it never skips runs.
+has_default_route() {
+  local rc
+  "$GS_ROUTE" -n get default >/dev/null 2>&1 && return 0
+  rc=$?
+  [ "$rc" -lt 126 ] && return 1
+  log_msg WARN "offline check failed: cannot run $GS_ROUTE (rc $rc)"
+  return 0
 }
 
 # Offline streak (global state file, git-config format): since = first skip, lastSkip = latest.
+# lastSkip is written first, so a set since always has a lastSkip.
 streak_record() {
   local t; t=$(now)
-  streak_read since >/dev/null || git config -f "$GS_STATE" offline.since "$t"
-  git config -f "$GS_STATE" offline.lastSkip "$t"
+  if ! git config -f "$GS_STATE" offline.lastSkip "$t" 2>/dev/null ||
+     ! { streak_read since >/dev/null || git config -f "$GS_STATE" offline.since "$t" 2>/dev/null; }; then
+    log_msg WARN "cannot record offline streak in $GS_STATE"
+  fi
 }
 # streak_read since|lastSkip: prints the field; rc 1 if no streak.
 streak_read() {
@@ -1361,7 +1370,7 @@ cmd_sync() {
     watch_scan
     entries=$(list_repos)
   fi
-  if [ "$(cfg_get sync.disableOfflineCheck)" != true ] && needs_offline_check "$entries" && ! is_online; then
+  if [ "$(cfg_get sync.disableOfflineCheck)" != true ] && needs_offline_check "$entries" && ! has_default_route; then
     log_msg INFO "offline, run skipped"
     streak_record
     [ "$GS_JOB" = 1 ] && return 0
@@ -1369,8 +1378,6 @@ cmd_sync() {
     return 1
   fi
   n=$(printf '%s' "$entries" | grep -c .)
-  # A run that actually syncs a repo ends any offline streak.
-  [ "$n" = 0 ] || streak_clear
   log_msg INFO "run start ($n repos)"
   if [ "$all" = 0 ]; then
     if repo_listed "$repo"; then
@@ -1412,6 +1419,8 @@ cmd_sync() {
   done <<EOF
 $(sort -t "$(printf '\t')" -k3 "$runfile")
 EOF
+  # A run that actually synced a repo (ok or blocked) ends any offline streak.
+  [ $((ok + blocked)) = 0 ] || streak_clear
   hosts=$(host_report)
   rm -f "$runfile"
   host_state_clear
@@ -1698,7 +1707,7 @@ AWK
 }
 
 cmd_status() {
-  local verbose=0 list_order=0 since
+  local verbose=0 list_order=0 since last
   while [ $# -gt 0 ]; do
     case "$1" in
       -v|--verbose) verbose=1 ;;
@@ -1714,8 +1723,10 @@ cmd_status() {
   else
     echo "Notifications: disabled"
   fi
-  since=$(streak_read since) &&
-    echo "Offline:       skipped since $since (last $(streak_read lastSkip))"
+  if since=$(streak_read since); then
+    last=$(streak_read lastSkip) || last=$since
+    echo "Offline:       skipped since $since (last $last)"
+  fi
   if [ -z "$(list_repos)" ]; then
     echo "No repos."
     return 0
