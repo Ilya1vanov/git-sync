@@ -529,22 +529,32 @@ fetch_abort() {
 # "<repo>\t<remote>" line per host skip). The lock-owning run removes them at
 # run start (leftovers of a killed run), at run end and on interrupt.
 
-# remote_host REPO REMOTE: prints the host of REMOTE's URL; rc 1 if it has none
-# (never grouped). Parses ssh:// and scp-style [user@]host:path URLs.
+# remote_host REPO REMOTE: prints the host of REMOTE's URL as git expands it
+# (insteadOf applies), lowercased, with the port only when the URL states one;
+# rc 1 if it has none (never grouped). Parses ssh://, git://, http(s):// and
+# scp-style [user@]host:path URLs, IPv6 in brackets. ssh aliases are kept as-is.
 remote_host() {
   local url h
   url=$(git -C "$1" ls-remote --get-url "$2" 2>/dev/null) || return 1
+  h=${url%%::*}
+  if [ "$h" != "$url" ]; then
+    case "$h" in ''|*[!A-Za-z0-9+.-]*) ;; *) return 1 ;; esac   # <transport>::address
+  fi
   case "$url" in
-    ssh://*) h=${url#ssh://}; h=${h%%/*}; h=${h##*@} ;;
-    *::*|*://*|/*|./*|../*) return 1 ;;
+    ssh://*|git://*|http://*|https://*)
+      h=${url#*://}; h=${h%%/*}; h=${h##*@} ;;
+    *://*|/*|./*|../*) return 1 ;;
     *:*)
-      h=${url%%:*}
-      case "$h" in */*) return 1 ;; esac
-      h=${h##*@} ;;
+      h=$url
+      case "${h%%@*}" in *:*|*/*) ;; *) h=${h#*@} ;; esac
+      case "$h" in
+        \[*\]:*) h="${h%%]:*}]" ;;
+        *) h=${h%%:*}; case "$h" in */*) return 1 ;; esac ;;
+      esac ;;
     *) return 1 ;;
   esac
-  [ -n "$h" ] || return 1
-  printf '%s\n' "$h"
+  case "$h" in ''|:*|\[\]*) return 1 ;; esac
+  printf '%s\n' "$h" | tr '[:upper:]' '[:lower:]'
 }
 
 host_marker() {

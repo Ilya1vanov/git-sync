@@ -227,9 +227,17 @@ A connection error is git's stderr (C locale) matching one of: could not
 resolve host(name), connection refused, connection timed out, operation timed
 out, network is unreachable, no route to host, failed to connect. Other
 failures, such as `Permission denied (publickey)`, and fetch timeouts leave the
-host alone. The host is taken from `ssh://[user@]host[:port]/…` and scp-style
-`[user@]host:path` URLs (after `insteadOf` rewriting); other URLs are never
-grouped. ssh aliases are not resolved, so each alias is its own host.
+host alone.
+
+The host comes from the remote's URL as git expands it (as
+`git ls-remote --get-url` shows it), so `url.<base>.insteadOf` rewrites apply.
+It is read from `ssh://`, `git://`, `http://` and `https://` URLs and from
+scp-style `[user@]host:path`, including IPv6 addresses in brackets (`[::1]`).
+The host is compared lowercased, and the port is part of it only when the URL
+states one: `github.com` and `GitHub.com` are one host, `host` and `host:2222`
+are two. ssh aliases are not resolved, so each alias is its own host. Local
+paths, `file://` URLs, `<transport>::` helper URLs and anything else have no
+host: they are never grouped and are fetched as usual.
 
 ## Maintenance
 

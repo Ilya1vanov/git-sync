@@ -853,6 +853,66 @@ test_host_skip_state_of_killed_run_removed() {
   # (the killed run's fetch temp dir is a separate, older leftover)
   assert_eq "$(run_state | grep -v '/fetch\.[0-9]*$')" ""
 }
+test_host_identity_ignores_case() {
+  two_on_down_host && down_stub && gs config --global sync.jobs 1 &&
+  git -C "$T/r 2" remote set-url origin "ssh://git@DOWN.Invalid/y.git" || return 1
+  quiet gs_ssh sync --all
+  assert_eq "$({ allof "$WORK" blocker; allof "$T/r 2" blocker; } | sed "s/ .*//")" "fetch-failed:origin" &&
+  assert_eq "$(allof "$WORK" note; allof "$T/r 2" note)" "origin: skipped (host down.invalid unreachable)" &&
+  assert_eq "$(sshcalls)" 1
+}
+test_host_identity_explicit_port_separates() {
+  two_on_down_host && down_stub && gs config --global sync.jobs 1 &&
+  git -C "$T/r 2" remote set-url origin "ssh://down.invalid:22/y.git" || return 1
+  quiet gs_ssh sync --all
+  assert_eq "$({ allof "$WORK" blocker; allof "$T/r 2" blocker; } | sed "s/ .*//")" \
+    "fetch-failed:origin
+fetch-failed:origin" &&
+  assert_eq "$(allof "$WORK" note; allof "$T/r 2" note)" "" &&
+  assert_eq "$(sshcalls)" 2
+}
+test_host_identity_https() {
+  two_on_down_host && gs config --global sync.jobs 1 &&
+  git -C "$WORK" remote set-url origin "https://127.0.0.1:1/x.git" &&
+  git -C "$T/r 2" remote set-url origin "https://user@127.0.0.1:1/y.git" || return 1
+  old=$(git -C "$WORK" rev-parse develop)
+  quiet gs sync --all
+  assert_eq "$({ allof "$WORK" blocker; allof "$T/r 2" blocker; } | sed "s/ .*//")" "fetch-failed:origin" &&
+  assert_eq "$(allof "$WORK" note; allof "$T/r 2" note)" "origin: skipped (host 127.0.0.1:1 unreachable)" &&
+  assert_eq "$(git -C "$WORK" rev-parse develop)" "$old" &&
+  assert_eq "$(git -C "$T/r 2" rev-parse develop)" "$old"
+}
+test_host_identity_insteadof_rewritten() {
+  two_on_down_host && down_stub && gs config --global sync.jobs 1 &&
+  git -C "$T/r 2" config url."ssh://down.invalid/".insteadOf "gh:" &&
+  git -C "$T/r 2" remote set-url origin "gh:y.git" || return 1
+  quiet gs_ssh sync --all
+  assert_eq "$({ allof "$WORK" blocker; allof "$T/r 2" blocker; } | sed "s/ .*//")" "fetch-failed:origin" &&
+  assert_eq "$(allof "$WORK" note; allof "$T/r 2" note)" "origin: skipped (host down.invalid unreachable)" &&
+  assert_eq "$(sshcalls)" 1
+}
+test_host_identity_ipv6() {
+  two_on_down_host && gs config --global sync.jobs 1 &&
+  git -C "$WORK" remote set-url origin "https://[::1]:1/x.git" &&
+  git -C "$T/r 2" remote set-url origin "http://[::1]:1/y.git" || return 1
+  quiet gs sync --all
+  assert_eq "$({ allof "$WORK" blocker; allof "$T/r 2" blocker; } | sed "s/ .*//")" "fetch-failed:origin" &&
+  assert_eq "$(allof "$WORK" note; allof "$T/r 2" note)" "origin: skipped (host [::1]:1 unreachable)"
+}
+test_host_identity_none_for_local_and_helper() {
+  two_on_down_host && gs config --global sync.jobs 1 &&
+  git -C "$WORK" remote set-url origin "$T/gone:x.git" &&
+  git -C "$WORK" remote add second "file://$T/gone:x.git" &&
+  git -C "$T/r 2" remote set-url origin "nohelper::down.invalid:x.git" &&
+  git -C "$T/r 2" remote add second "nohelper::down.invalid:x.git" || return 1
+  quiet gs sync --all
+  assert_eq "$({ allof "$WORK" blocker; allof "$T/r 2" blocker; } | sed "s/ .*//")" \
+    "fetch-failed:origin
+fetch-failed:second
+fetch-failed:origin
+fetch-failed:second" &&
+  assert_eq "$(allof "$WORK" note; allof "$T/r 2" note)" ""
+}
 
 ffsetup() { gs init >/dev/null && make_repos "$@" && gs install "$WORK" >/dev/null; }
 blockers() { git config -f "$(sf_of "$WORK")" --get-all status.blocker; }
