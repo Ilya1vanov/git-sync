@@ -72,15 +72,31 @@ cfg_global_get() {
   git config -f "$GS_CONFIG" --get "$1" 2>/dev/null
 }
 
+# cfg_valid KEY NAME VAL: rc 0 if the stored VAL (config name NAME) is usable
+# for KEY. Values that reach shell arithmetic, sleep or xargs are validated on
+# every read, since config files can be edited by hand and bash (macOS /bin/sh)
+# runs a $(...) inside an array subscript in arithmetic. An invalid value is
+# warned about and skipped, so the next level applies.
+cfg_valid() {
+  case "$1" in
+    sync.period|sync.fetchTimeout|sync.jobs|sync.jitter|log.maxSize) ;;
+    *) return 0 ;;
+  esac
+  validate_value "$1" "$3" 2>/dev/null && return 0
+  warn "ignoring invalid value of $2: $3"
+  log_msg WARN "ignoring invalid value of $2: $3"
+  return 1
+}
+
 cfg_get() {
   local key=$1 repo=${2:-} name val
   if [ -n "$repo" ] && name=$(cfg_repo_name "$key"); then
-    if val=$(git -C "$repo" config --get "$name" 2>/dev/null); then
+    if val=$(git -C "$repo" config --get "$name" 2>/dev/null) && cfg_valid "$key" "$name" "$val"; then
       printf '%s\n' "$val"
       return 0
     fi
   fi
-  if val=$(cfg_global_get "$key"); then
+  if val=$(cfg_global_get "$key") && cfg_valid "$key" "$key" "$val"; then
     printf '%s\n' "$val"
     return 0
   fi
@@ -88,11 +104,11 @@ cfg_get() {
 }
 
 cfg_source() {
-  local key=$1 repo=${2:-} name
+  local key=$1 repo=${2:-} name val
   if [ -n "$repo" ] && name=$(cfg_repo_name "$key") &&
-     git -C "$repo" config --get "$name" >/dev/null 2>&1; then
+     val=$(git -C "$repo" config --get "$name" 2>/dev/null) && cfg_valid "$key" "$name" "$val" 2>/dev/null; then
     echo repo
-  elif cfg_global_get "$key" >/dev/null; then
+  elif val=$(cfg_global_get "$key") && cfg_valid "$key" "$key" "$val" 2>/dev/null; then
     echo global
   else
     echo default
@@ -1077,13 +1093,20 @@ Commands:
 EOF
 }
 
+# init_home: create GS_HOME and its status dir, private to the user (logs and
+# status hold repo paths and fetch errors).
+init_home() {
+  mkdir -p "$GS_STATUS_DIR" || die "cannot create $GS_STATUS_DIR"
+  chmod 700 "$GS_HOME" || die "cannot set permissions of $GS_HOME"
+}
+
 cmd_init() {
   if [ -f "$GS_CONFIG" ]; then
-    mkdir -p "$GS_STATUS_DIR" || die "cannot create $GS_STATUS_DIR"
+    init_home
     echo "git-sync: already initialized ($GS_HOME)"
     return 0
   fi
-  mkdir -p "$GS_STATUS_DIR" || die "cannot create $GS_STATUS_DIR"
+  init_home
   git config -f "$GS_CONFIG" sync.period 20m &&
   git config -f "$GS_CONFIG" sync.mode fast-forward &&
   git config -f "$GS_CONFIG" sync.ffCheckedOut false &&
