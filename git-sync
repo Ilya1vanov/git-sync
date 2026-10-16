@@ -574,6 +574,16 @@ is_connection_error() {
 
 host_state_clear() { rm -rf "$GS_HOME"/host.*; }
 
+# host_report: "<host>\t<skips>" per unreachable host with at least one host skip,
+# sorted by host. Read by the parent before host_state_clear.
+host_report() {
+  local m
+  for m in "$GS_HOME"/host.*; do
+    [ -s "$m/skips" ] || continue
+    printf '%s\t%s\n' "$(cat "$m/name")" "$(grep -c . "$m/skips")"
+  done | sort
+}
+
 sync_fetch() {
   local repo=$1 remotes r err limit secs d host
   remotes=$(git -C "$repo" remote 2>/dev/null)
@@ -967,6 +977,7 @@ notify_wanted() {
 # collects; notify_run_end sends.
 NOTIFY_NEW_BLOCKED=   # "; "-separated "<repo>: <key>, <key>"
 NOTIFY_NEW_COUNT=0
+NOTIFY_HOSTS=        # "; <host> unreachable (N skipped)" per reported host
 
 # new_blocker_keys: comma-separated blocker keys of the repo just synced that
 # were not in its previous status file (SYNC_PREV_KEYS); empty if none.
@@ -993,7 +1004,7 @@ notify_collect() {
 notify_run_end() {
   local title msg summary=
   if notify_wanted finished; then
-    summary="$(( $1 + $2 + $3 )) repos: $1 ok, $2 blocked, $3 failed"
+    summary="$(( $1 + $2 + $3 )) repos: $1 ok, $2 blocked, $3 failed$NOTIFY_HOSTS"
   fi
   if [ "$NOTIFY_NEW_COUNT" -eq 1 ]; then
     title="git-sync: $NOTIFY_LAST_REPO" msg=$NOTIFY_LAST_KEYS
@@ -1287,7 +1298,7 @@ list_repo_lines() {
 }
 
 cmd_sync() {
-  local all=0 repo n=0 ok=0 blocked=0 failed=0 rc=0 keys line entries listed path= runfile result
+  local all=0 repo n=0 ok=0 blocked=0 failed=0 rc=0 keys line entries listed path= runfile result hosts h c w
   while [ $# -gt 0 ]; do
     case "$1" in
       --all) all=1 ;;
@@ -1369,8 +1380,19 @@ cmd_sync() {
   done <<EOF
 $(sort -t "$(printf '\t')" -k3 "$runfile")
 EOF
+  hosts=$(host_report)
   rm -f "$runfile"
   host_state_clear
+  # One report per unreachable host that caused host skips.
+  while IFS="$(printf '\t')" read -r h c; do
+    [ -n "$h" ] || continue
+    if [ "$c" = 1 ]; then w=remote; else w=remotes; fi
+    log_msg WARN "$h: unreachable, $c $w skipped"
+    [ "$GS_JOB" = 1 ] || echo "$h: unreachable, $c $w skipped"
+    NOTIFY_HOSTS="$NOTIFY_HOSTS; $h unreachable ($c skipped)"
+  done <<EOF
+$hosts
+EOF
   # A worker that died without reporting counts as failed.
   if [ $((ok + blocked + failed)) -lt "$n" ]; then
     log_msg ERROR "$((n - ok - blocked - failed)) repo(s) did not report a result"
