@@ -106,7 +106,11 @@ git working tree (depth 1, hidden folders skipped); linked worktrees resolve to
 their main worktree, so they are counted as already installed. Excluded repos
 (see Watched roots) are skipped and counted in the summary
 (`1 installed, 0 already installed, 0 failed, 1 excluded`).
-Unknown keys are rejected unless `--force` is given.
+Unknown keys are rejected unless `--force` is given. Values of `sync.period`,
+`sync.fetchTimeout`, `sync.jobs`, `sync.jitter` and `log.maxSize` are also
+checked when read, as config files can be edited by hand: an invalid one is
+ignored with a warning (`ignoring invalid value of <name>: <value>`, also
+logged at WARN) and the next level applies.
 
 ## Watched roots
 
@@ -303,7 +307,8 @@ Offline:       skipped since <first skip> (last <latest skip>)
 
 The line disappears after the next run that actually syncs.
 
-Files under `~/.git-sync` (override with `GIT_SYNC_HOME`):
+Files under `~/.git-sync` (override with `GIT_SYNC_HOME`; `init` sets the
+folder to mode 700, so re-run `git-sync init` to tighten an older install):
 
 | Path | Content |
 |---|---|
@@ -363,3 +368,12 @@ sh tests/run.sh test_name ...   # selected tests
 
 Tests run in temporary sandboxes with stubbed `launchctl`, `route` and notifier, so they
 never touch your real `~/.git-sync` or LaunchAgents. Completion tests need zsh for the zsh cases and skip them without it.
+
+## Security
+
+See [SECURITY.md](SECURITY.md) for the trust model and how to report a
+vulnerability.
+
+## License
+
+[MIT](LICENSE)

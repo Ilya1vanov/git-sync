@@ -170,6 +170,11 @@ test_init_idempotent_no_overwrite() {
   out=$(gs init) && assert_contains "$out" "already initialized" &&
   assert_eq "$(git config -f "$GIT_SYNC_HOME/config" sync.period)" 5m
 }
+test_init_home_private() {
+  gs init >/dev/null && assert_eq "$(stat -f %Lp "$GIT_SYNC_HOME")" 700 &&
+  chmod 755 "$GIT_SYNC_HOME" && gs init >/dev/null &&
+  assert_eq "$(stat -f %Lp "$GIT_SYNC_HOME")" 700
+}
 test_init_prints_next_steps() {
   out=$(gs init) && assert_contains "$out" "git-sync install" && assert_contains "$out" "git-sync start"
 }
@@ -234,6 +239,32 @@ test_config_fetch_timeout_repo_override() {
   assert_contains "$(gs config)" "sync.fetchTimeout = 20m (repo)" &&
   { gs config sync.fetchTimeout 2h 2>/dev/null; [ $? -ne 0 ]; } &&
   assert_eq "$(gs config --global sync.fetchTimeout)" 2m
+}
+# Hand-edited values are validated on read: an invalid one is skipped with a
+# warning (next level applies) and never reaches shell arithmetic, where bash
+# would run a $(...) inside an array subscript.
+test_config_invalid_stored_value_ignored() {
+  local evil
+  gs init >/dev/null && make_repos && gs install "$WORK" >/dev/null &&
+  evil='HOME[$(touch "$STUB_DIR/pwned")]'
+  git -C "$WORK" config git-sync.fetchTimeout "${evil}m" &&
+  git config -f "$GIT_SYNC_HOME/config" log.maxSize "${evil}M" &&
+  git config -f "$GIT_SYNC_HOME/config" sync.period "${evil}m" &&
+  git config -f "$GIT_SYNC_HOME/config" sync.jobs "${evil}" &&
+  git config -f "$GIT_SYNC_HOME/config" sync.jitter "${evil}" &&
+  gs config --global sync.fetchTimeout 2m &&
+  gs sync "$WORK" >"$T/out" 2>"$T/err" &&
+  gs sync --all >/dev/null 2>>"$T/err" &&
+  gs start >/dev/null 2>>"$T/err" &&
+  assert_no_file "$STUB_DIR/pwned" &&
+  assert_contains "$(cat "$T/out")" "$WORK: ok" &&
+  assert_contains "$(cat "$T/err")" "ignoring invalid value of git-sync.fetchTimeout" &&
+  assert_contains "$(cat "$T/err")" "ignoring invalid value of log.maxSize" &&
+  assert_contains "$(cat "$T/err")" "ignoring invalid value of sync.period" &&
+  assert_contains "$(cat "$GIT_SYNC_HOME/git-sync.log")" "ignoring invalid value of sync.jobs" &&
+  assert_contains "$(cat "$GIT_SYNC_AGENTS_DIR/com.git-sync.agent.plist")" "<integer>1200</integer>" &&
+  assert_eq "$(cd "$WORK" && gs config sync.fetchTimeout 2>/dev/null)" 2m &&
+  assert_eq "$(gs config sync.jobs 2>/dev/null)" 8
 }
 test_config_repo_override_and_unset() {
   gs init >/dev/null && make_repos && cd "$WORK" &&
