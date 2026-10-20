@@ -863,6 +863,26 @@ test_interrupt_kills_foreground_child_of_stuck_worker() {
     interrupted_run 'fetches 1' "$sig" sync --all || { echo "    ($sig)"; return 1; }
   done
 }
+test_interrupt_lets_stuck_git_remove_its_lock() {
+  make_repos && gs install "$WORK" >/dev/null &&
+  gs config --global sync.mode maintain-only || return 1
+  # like git, the stuck `maintenance run` removes its lock file on TERM only
+  lock="$WORK/.git/objects/maintenance.lock"
+  real=$(command -v git) &&
+  cat > "$T/bin/git" <<EOF &&
+#!/bin/sh
+case " \$* " in
+  *" maintenance run "*)
+    : > "$lock"
+    trap 'rm -f "$lock"; exit 143' TERM
+    while :; do sleep 1; done ;;
+esac
+exec "$real" "\$@"
+EOF
+  chmod +x "$T/bin/git" || return 1
+  interrupted_run '[ -e "$lock" ]' TERM sync --all &&
+  assert_no_file "$lock"
+}
 test_interrupt_removes_fetch_dir_of_killed_worker() {
   make_repos && gs install "$WORK" >/dev/null && hang_stub &&
   gs config --global sync.fetchTimeout 53 &&

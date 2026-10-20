@@ -409,11 +409,13 @@ group_reap() {
   wait_gone "$2" -"$1" || kill -KILL -"$1" 2>/dev/null
 }
 
-# tree_kill PID...: KILL each PID and all its descendants. Each level is
-# stopped before its children are listed, so none forks unseen; a descendant
-# leading its own process group (a fetch, a sleeper) is killed by group.
-tree_kill() {
-  local all= level="$*" next p
+# tree_reap PID...: stop each PID and all its descendants, TERM them (so git
+# removes its lock files), and KILL whatever is still alive after
+# GS_ABORT_GRACE. Each level is stopped before its children are listed, so
+# none forks unseen; a descendant leading its own process group (a fetch, a
+# sleeper) is signalled by group.
+tree_reap() {
+  local all= level="$*" next p targets=
   while [ -n "$level" ]; do
     kill -STOP $level 2>/dev/null
     all="$all $level"
@@ -422,9 +424,15 @@ tree_kill() {
     level=$(echo $next)
   done
   for p in $all; do
-    [ "$(ps -o pgid= -p "$p" 2>/dev/null | tr -d ' ')" != "$p" ] || kill -KILL -"$p" 2>/dev/null
+    if [ "$(ps -o pgid= -p "$p" 2>/dev/null | tr -d ' ')" = "$p" ]; then
+      targets="$targets -$p"
+    else
+      targets="$targets $p"
+    fi
   done
-  kill -KILL $all 2>/dev/null
+  kill -TERM $targets 2>/dev/null
+  kill -CONT $targets 2>/dev/null
+  wait_gone "$GS_ABORT_GRACE" $targets || kill -KILL $targets 2>/dev/null
 }
 
 # PID of the xargs running parallel `sync --all` workers; empty otherwise.
@@ -433,7 +441,7 @@ GS_XARGS_PID=
 # run_interrupted: INT/TERM handler of a run. Stops the inline fetch, then
 # xargs (frozen first so it starts no new worker) and every worker it started.
 # Each worker stops its own fetch within GS_ABORT_GRACE (plus polling); the
-# run waits 2s longer than that, then kills stragglers (a worker stuck in a
+# run waits 2s longer than that, then reaps stragglers (a worker stuck in a
 # foreground command defers its trap) with all their descendants, and removes
 # temp dirs of workers that died uncleanly (the run holds the lock, so no
 # other run owns them). Exiting releases the lock.
@@ -447,7 +455,7 @@ run_interrupted() {
     kill -TERM "$GS_XARGS_PID" 2>/dev/null
     kill -CONT "$GS_XARGS_PID" 2>/dev/null
     if [ -n "$workers" ] && ! wait_gone $((GS_ABORT_GRACE + 2)) $workers; then
-      tree_kill $workers
+      tree_reap $workers
     fi
     rm -rf "$GS_HOME"/fetch.*
   fi
