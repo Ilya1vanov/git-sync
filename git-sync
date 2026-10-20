@@ -14,7 +14,7 @@ GS_AGENTS_DIR=${GIT_SYNC_AGENTS_DIR:-$HOME/Library/LaunchAgents}
 GS_LABEL=com.git-sync.agent
 GS_PLIST="$GS_AGENTS_DIR/$GS_LABEL.plist"
 GS_LAUNCHCTL=${GIT_SYNC_LAUNCHCTL:-launchctl}
-GS_ROUTE=${GIT_SYNC_ROUTE:-route}
+GS_ROUTE=${GIT_SYNC_ROUTE:-/sbin/route}
 # Caller's original GIT_SSH_COMMAND (set-ness and value), restored per repo by git_env_for.
 GS_ORIG_SSH_SET=${GIT_SSH_COMMAND+set}
 GS_ORIG_SSH_CMD=${GIT_SSH_COMMAND-}
@@ -283,16 +283,31 @@ log_rotate() {
   return 0
 }
 
-# Offline check: online iff a default route exists. Local routing table only (-n: no DNS).
-is_online() {
-  $GS_ROUTE -n get default >/dev/null 2>&1
+# Offline check: rc 1 only if there is no IPv4 or IPv6 default route ("default" alone
+# is IPv4 only). Local routing table only (-n: no DNS). macOS route exits 0 even without
+# a route ("not in table" on stderr, nothing on stdout), so the route is read from
+# stdout. A failing route counts as a route, so it never skips runs.
+has_default_route() {
+  local family out rc
+  for family in -inet -inet6; do
+    out=$("$GS_ROUTE" -n get $family default 2>/dev/null); rc=$?
+    if [ "$rc" != 0 ]; then
+      log_msg WARN "offline check failed: $GS_ROUTE exited $rc"
+      return 0
+    fi
+    case "$out" in *interface:*) return 0 ;; esac
+  done
+  return 1
 }
 
 # Offline streak (global state file, git-config format): since = first skip, lastSkip = latest.
+# lastSkip is written first, so a set since always has a lastSkip.
 streak_record() {
   local t; t=$(now)
-  streak_read since >/dev/null || git config -f "$GS_STATE" offline.since "$t"
-  git config -f "$GS_STATE" offline.lastSkip "$t"
+  if ! git config -f "$GS_STATE" offline.lastSkip "$t" 2>/dev/null ||
+     ! { streak_read since >/dev/null || git config -f "$GS_STATE" offline.since "$t" 2>/dev/null; }; then
+    log_msg WARN "cannot record offline streak in $GS_STATE"
+  fi
 }
 # streak_read since|lastSkip: prints the field; rc 1 if no streak.
 streak_read() {
@@ -1330,7 +1345,7 @@ list_repo_lines() {
 }
 
 cmd_sync() {
-  local all=0 repo n=0 ok=0 blocked=0 failed=0 rc=0 keys line entries listed path= runfile result hosts host count noun report
+  local all=0 repo n=0 ok=0 blocked=0 failed=0 rc=0 keys line entries listed path= runfile result hosts host count noun report online=0
   while [ $# -gt 0 ]; do
     case "$1" in
       --all) all=1 ;;
@@ -1361,16 +1376,17 @@ cmd_sync() {
     watch_scan
     entries=$(list_repos)
   fi
-  if [ "$(cfg_get sync.disableOfflineCheck)" != true ] && needs_offline_check "$entries" && ! is_online; then
-    log_msg INFO "offline, run skipped"
-    streak_record
-    [ "$GS_JOB" = 1 ] && return 0
-    echo "offline"
-    return 1
+  if [ "$(cfg_get sync.disableOfflineCheck)" != true ] && needs_offline_check "$entries"; then
+    if ! has_default_route; then
+      log_msg INFO "offline, run skipped"
+      streak_record
+      [ "$GS_JOB" = 1 ] && return 0
+      echo "offline"
+      return 1
+    fi
+    online=1
   fi
   n=$(printf '%s' "$entries" | grep -c .)
-  # A run that actually syncs a repo ends any offline streak.
-  [ "$n" = 0 ] || streak_clear
   log_msg INFO "run start ($n repos)"
   if [ "$all" = 0 ]; then
     if repo_listed "$repo"; then
@@ -1412,6 +1428,9 @@ cmd_sync() {
   done <<EOF
 $(sort -t "$(printf '\t')" -k3 "$runfile")
 EOF
+  # A completed run ends any offline streak if it passed the check (even if no repo
+  # then synced) or synced a repo (ok or blocked). An interrupted run never gets here.
+  if [ "$online" = 1 ] || [ $((ok + blocked)) -gt 0 ]; then streak_clear; fi
   hosts=$(host_report)
   rm -f "$runfile"
   host_state_clear
@@ -1698,7 +1717,7 @@ AWK
 }
 
 cmd_status() {
-  local verbose=0 list_order=0 since
+  local verbose=0 list_order=0 since last
   while [ $# -gt 0 ]; do
     case "$1" in
       -v|--verbose) verbose=1 ;;
@@ -1714,8 +1733,10 @@ cmd_status() {
   else
     echo "Notifications: disabled"
   fi
-  since=$(streak_read since) &&
-    echo "Offline:       skipped since $since (last $(streak_read lastSkip))"
+  if since=$(streak_read since); then
+    last=$(streak_read lastSkip) || last=$since
+    echo "Offline:       skipped since $since (last $last)"
+  fi
   if [ -z "$(list_repos)" ]; then
     echo "No repos."
     return 0

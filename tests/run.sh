@@ -42,11 +42,17 @@ EOF
 #!/bin/sh
 printf '%s|%s\n' "$1" "$2" >> "$STUB_DIR/notify.calls"
 EOF
-  # route stub: records calls; reports a default route (online) unless $STUB_DIR/offline exists
+  # route stub: records calls; like macOS route, exits 0 either way and prints the
+  # route (online) unless $STUB_DIR/offline exists, then only "not in table" on stderr
   cat > "$T/bin/route" <<'EOF'
 #!/bin/sh
 echo "$*" >> "$STUB_DIR/route.calls"
-[ ! -e "$STUB_DIR/offline" ]
+if [ -e "$STUB_DIR/offline" ]; then
+  echo "route: writing to routing socket: not in table" >&2
+else
+  printf '   route to: default\ndestination: default\n    gateway: 192.0.2.1\n  interface: en0\n'
+fi
+exit 0
 EOF
   chmod +x "$T/bin/launchctl" "$T/bin/notify" "$T/bin/route"
   export STUB_DIR="$T" GIT_SYNC_LAUNCHCTL="$T/bin/launchctl" GIT_SYNC_NOTIFY_CMD="$T/bin/notify"
@@ -493,7 +499,7 @@ test_lock_held_skips() {
 }
 test_offline_check_online_syncs() {
   make_repos && gs install "$WORK" >/dev/null && push_commit develop &&
-  gs sync --all >/dev/null && assert_eq "$(cat "$T/route.calls")" "-n get default" &&
+  gs sync --all >/dev/null && assert_eq "$(cat "$T/route.calls")" "-n get -inet default" &&
   assert_eq "$(git -C "$WORK" rev-parse origin/develop)" "$(git -C "$T/remote.git" rev-parse develop)" &&
   assert_eq "$(sget "$WORK" result)" ok
 }
@@ -563,6 +569,68 @@ test_offline_lock_held_reports_in_progress() {
   out=$(gs sync --all) ; rc=$? ; kill $pid ;
   assert_eq $rc 0 && assert_eq "$out" "another run in progress" && assert_no_file "$T/route.calls" &&
   cmp -s "$GIT_SYNC_HOME/state" "$T/state.before"
+}
+test_offline_route_missing_not_offline() {
+  make_repos && gs install "$WORK" >/dev/null && export GIT_SYNC_ROUTE="$T/no such/route" || return 1
+  out=$(gs sync --all 2>&1); rc=$?
+  assert_eq $rc 0 && assert_not_contains "$out" offline && assert_eq "$(sget "$WORK" result)" ok &&
+  assert_contains "$(cat "$GIT_SYNC_HOME/git-sync.log")" "WARN offline check failed"
+}
+test_offline_route_path_with_spaces() {
+  make_repos && gs install "$WORK" >/dev/null && mkdir "$T/my bin" &&
+  cp "$T/bin/route" "$T/my bin/route" && export GIT_SYNC_ROUTE="$T/my bin/route" && touch "$T/offline" || return 1
+  out=$(gs sync --all 2>&1); rc=$?
+  assert_eq $rc 1 && assert_eq "$out" offline && assert_file "$T/route.calls"
+}
+test_offline_route_error_not_offline() {
+  make_repos && gs install "$WORK" >/dev/null &&
+  printf '#!/bin/sh\necho "route: bad" >&2\nexit 1\n' > "$T/bin/route" || return 1
+  out=$(gs sync --all 2>&1); rc=$?
+  assert_eq $rc 0 && assert_not_contains "$out" offline && assert_eq "$(sget "$WORK" result)" ok &&
+  assert_contains "$(cat "$GIT_SYNC_HOME/git-sync.log")" "WARN offline check failed: $T/bin/route exited 1"
+}
+test_offline_ipv6_only_route_is_online() {
+  make_repos && gs install "$WORK" >/dev/null &&
+  cat > "$T/bin/route" <<'EOF' || return 1
+#!/bin/sh
+echo "$*" >> "$STUB_DIR/route.calls"
+case "$*" in
+  *-inet6*) printf '   route to: ::\ndestination: default\n  interface: en0\n' ;;
+  *) echo "route: writing to routing socket: not in table" >&2 ;;
+esac
+exit 0
+EOF
+  out=$(gs sync --all 2>&1); rc=$?
+  assert_eq $rc 0 && assert_not_contains "$out" offline && assert_eq "$(sget "$WORK" result)" ok &&
+  assert_contains "$(cat "$T/route.calls")" "-n get -inet6 default"
+}
+test_offline_streak_cleared_when_online_but_nothing_synced() {
+  mkdir "$T/gone" && git init -q "$T/gone" && gs install "$T/gone" >/dev/null && rm -rf "$T/gone" &&
+  git config -f "$GIT_SYNC_HOME/state" offline.since 2000-01-01T00:00:00+0000 &&
+  git config -f "$GIT_SYNC_HOME/state" offline.lastSkip 2000-01-02T00:00:00+0000 || return 1
+  gs sync --all >/dev/null 2>&1
+  assert_file "$T/route.calls" && assert_eq "$(sget "$T/gone" result)" missing &&
+  assert_eq "$(streak_get since)$(streak_get lastSkip)" ""
+}
+test_offline_streak_kept_when_unchecked_and_nothing_synced() {
+  gs config --global sync.disableOfflineCheck true &&
+  mkdir "$T/gone" && git init -q "$T/gone" && gs install "$T/gone" >/dev/null && rm -rf "$T/gone" &&
+  git config -f "$GIT_SYNC_HOME/state" offline.since 2000-01-01T00:00:00+0000 &&
+  git config -f "$GIT_SYNC_HOME/state" offline.lastSkip 2000-01-02T00:00:00+0000 || return 1
+  gs sync --all >/dev/null 2>&1
+  assert_no_file "$T/route.calls" && assert_eq "$(sget "$T/gone" result)" missing &&
+  assert_eq "$(streak_get since)" 2000-01-01T00:00:00+0000
+}
+test_offline_status_without_last_skip() {
+  mkdir -p "$GIT_SYNC_HOME" && git config -f "$GIT_SYNC_HOME/state" offline.since 2000-01-01T00:00:00+0000 || return 1
+  assert_contains "$(gs status)" \
+    "Offline:       skipped since 2000-01-01T00:00:00+0000 (last 2000-01-01T00:00:00+0000)"
+}
+test_offline_streak_write_failure_warns() {
+  make_repos && gs install "$WORK" >/dev/null && mkdir "$GIT_SYNC_HOME/state" && touch "$T/offline" || return 1
+  out=$(gs sync --all 2>&1); rc=$?
+  assert_eq $rc 1 && assert_contains "$out" offline &&
+  assert_contains "$(cat "$GIT_SYNC_HOME/git-sync.log")" "WARN cannot record offline streak"
 }
 test_offline_all_maintain_only_not_checked() {
   make_repos &&
@@ -762,6 +830,15 @@ test_interrupt_inline_run_stops_fetch() {
   # the lock is free: the next run proceeds
   ssh_stub && out=$(gs_ssh sync "$WORK" 2>&1)
   assert_eq "$out" "$WORK: blocked (fetch-failed:origin)"
+}
+test_interrupt_keeps_offline_streak() {
+  make_repos && gs install "$WORK" >/dev/null && hang_stub &&
+  gs config --global sync.fetchTimeout 53 &&
+  git -C "$WORK" remote set-url origin "ssh://example.invalid/x.git" &&
+  git config -f "$GIT_SYNC_HOME/state" offline.since 2000-01-01T00:00:00+0000 &&
+  git config -f "$GIT_SYNC_HOME/state" offline.lastSkip 2000-01-02T00:00:00+0000 || return 1
+  interrupted_run 'fetches 1' TERM sync "$WORK" &&
+  assert_file "$T/route.calls" && assert_eq "$(streak_get since)" 2000-01-01T00:00:00+0000
 }
 test_interrupt_parallel_run_stops_fetches() {
   make_repos && gs install "$WORK" >/dev/null && hang_stub &&
