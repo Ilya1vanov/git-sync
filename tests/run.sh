@@ -652,12 +652,17 @@ test_sync_env_respects_core_sshcommand() {
   assert_contains "$a" "--marker" && assert_not_contains "$a" "BatchMode=yes"
 }
 # hang_stub [ignore-term]: fake ssh that never finishes. Its command line holds
-# $T/bin/ssh, a unique marker for leak checks (`marked`).
+# $T/bin/ssh, a unique marker for leak checks (`marked`). Once its traps are
+# set it creates $T/hang.<pid> (see `fetches`). It is run once with --warm
+# here, as macOS can take over a second to start a new script the first time,
+# long enough for a 1s fetch timeout to TERM it before it ignores TERM.
 hang_stub() {
   { echo '#!/bin/sh'
+    echo '[ "${1-}" != --warm ] || exit 0'
     [ "${1:-}" = ignore-term ] && echo "trap '' TERM"
+    echo ': > "$STUB_DIR/hang.$$"'
     echo 'while :; do sleep 1; done'; } > "$T/bin/ssh"
-  chmod +x "$T/bin/ssh"
+  chmod +x "$T/bin/ssh" && "$T/bin/ssh" --warm
 }
 # marked: PIDs of live processes carrying the stub marker or a sleeper of N seconds ($1).
 marked() { pgrep -f "$T/bin/ssh"; [ -z "${1:-}" ] || pgrep -fx "sleep $1"; }
@@ -727,11 +732,23 @@ poll() {
   local n=0
   until eval "$2"; do n=$((n + 1)); [ "$n" -lt "$1" ] || return 1; sleep 0.1; done
 }
-# fetches N: true once N hanging fetches (fake ssh processes) are in flight.
-fetches() { [ "$(marked | grep -c .)" -ge "$1" ]; }
-# leftovers: PIDs of live fake ssh, 53s sleepers, jitter sleeps (2 decimals) or workers.
+# fetches N: true once N hanging fetches (fake ssh processes past their trap
+# setup, so an ignore-term stub really ignores TERM) are in flight.
+fetches() {
+  local f n=0
+  for f in "$T"/hang.*; do
+    [ -e "$f" ] && kill -0 "${f##*.}" 2>/dev/null && n=$((n + 1))
+  done
+  [ "$n" -ge "$1" ]
+}
+# jitters: PIDs of live jitter sleeps (2 decimals) of the run started by
+# interrupted_run. Workers start them without job control, so they stay in the
+# run's process group, also when orphaned; a global match would catch the
+# sleeps of any other git-sync run on the machine (e.g. the installed agent).
+jitters() { pgrep -g "$RUN_PGID" -fx 'sleep [0-9]+\.[0-9][0-9]'; }
+# leftovers: PIDs of live fake ssh, 53s sleepers, jitter sleeps or workers.
 leftovers() {
-  marked 53; pgrep -fx 'sleep [0-9]+\.[0-9][0-9]'; pgrep -f "__sync-one.*$GIT_SYNC_HOME/run"
+  marked 53; jitters; pgrep -f "__sync-one.*$GIT_SYNC_HOME/run"
 }
 # interrupted_run READY SIG ARGS...: starts `git-sync ARGS` in the background
 # (own process group, like a terminal job; sync.fetchTimeout should be 53),
@@ -741,6 +758,7 @@ leftovers() {
 interrupted_run() {
   local ready=$1 sig=$2 pid rc; shift 2
   set -m; gs_ssh "$@" > "$T/int.out" 2>&1 & pid=$!; set +m
+  RUN_PGID=$pid
   poll 100 "$ready" || { echo "    never ready: $ready"; kill -KILL -"$pid"; return 1; }
   if [ "$sig" = INT ]; then kill -INT -"$pid"; else kill -TERM "$(cat "$GIT_SYNC_HOME/lock/pid")"; fi
   poll 50 '! kill -0 "$pid" 2>/dev/null' || { echo "    run still alive after $sig"; kill -KILL -"$pid"; return 1; }
@@ -801,7 +819,7 @@ test_interrupt_during_jitter_is_prompt() {
   gs config --global sync.jobs 2 && gs config --global sync.jitter 50 &&
   gs config --global sync.mode maintain-only || return 1
   for sig in TERM INT; do
-    interrupted_run '[ -n "$(pgrep -fx "sleep [0-9]+\.[0-9][0-9]")" ]' "$sig" sync --all || { echo "    ($sig)"; return 1; }
+    interrupted_run '[ -n "$(jitters)" ]' "$sig" sync --all || { echo "    ($sig)"; return 1; }
   done
 }
 test_interrupt_removes_fetch_dir_of_killed_worker() {
