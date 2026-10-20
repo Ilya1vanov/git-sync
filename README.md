@@ -171,8 +171,9 @@ git-sync help
 - Only one sync runs at a time (lock in `~/.git-sync/lock`); a concurrent run
   logs that and exits 0.
 - Offline check: after taking the lock and before touching any repo, every run
-  checks for a default network route (`route -n get default`, which reads the
-  local routing table and makes no network or DNS calls). Without one, the run
+  checks for an IPv4 or IPv6 default network route (`route -n get -inet default`,
+  then `-inet6`, which read the local routing table and make no network or DNS
+  calls). Without one, the run
   is an offline skip: no repo is fetched or changed, no status file is
   rewritten, and `offline, run skipped` is logged at INFO. A job run then exits
   0 and sends no notification (neither `blocked` nor `finished`); a manual run
@@ -180,7 +181,9 @@ git-sync help
   remotes are reachable (captive portals, networks without internet), so such
   runs still produce `fetch-failed` blockers. If your remotes are reachable
   without a default route (LAN or file remotes), set
-  `sync.disableOfflineCheck=true`: no run makes the check.
+  `sync.disableOfflineCheck=true`: no run makes the check. If `route` itself
+  fails (missing, or a non-zero exit), the check logs a WARN and the run
+  proceeds as if online.
 - Runs that only maintain need no network: when every target repo's effective
   `sync.mode` is `maintain-only`, the offline check is not made and the run
   syncs normally, even offline. A run with any fetching repo, or with a missing
@@ -304,7 +307,9 @@ line after `Notifications:`:
 Offline:       skipped since <first skip> (last <latest skip>)
 ```
 
-The line disappears after the next run that actually syncs.
+The line disappears after the next completed (not interrupted) run that finds
+a default route, or, when no check is made, in which a repo ends `ok` or
+`blocked`.
 
 Files under `~/.git-sync` (override with `GIT_SYNC_HOME`). There is no setup
 step: the folder is created on first use by a command that writes there
@@ -319,7 +324,7 @@ set; everything else uses the defaults.
 |---|---|
 | `config` | Global config (git-config format) |
 | `status/<id>` | Last result per repo (rewritten each run) |
-| `state` | Offline streak (`offline.since`, `offline.lastSkip`; git-config format), cleared by the next syncing run |
+| `state` | Offline streak (`offline.since`, `offline.lastSkip`; git-config format), cleared when a run finds a default route or syncs a repo |
 | `git-sync.log`, `git-sync.log.1` | Rotating log; rotates when over `log.maxSize` |
 | `launchd.log` | Agent stdout/stderr, truncated on each `start` |
 
