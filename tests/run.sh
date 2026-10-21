@@ -1451,8 +1451,10 @@ test_watch_empty_folder_and_already_watched() {
   mkdir "$T/empty" && ln -s "$T/empty" "$T/link" &&
   out=$(gs install -r "$T/empty" --watch) &&
   assert_contains "$out" "Watching: $T/empty" &&
+  make_repos && git clone -q "$T/remote.git" "$T/empty/new" &&
   out=$(cd "$T" && gs install -r link/ --watch) &&
-  assert_eq "$out" "Already watched: $T/empty" &&
+  assert_contains "$out" "Installed: $T/empty/new" &&
+  assert_contains "$out" "Already watched: $T/empty" && assert_not_contains "$out" "Watching:" &&
   assert_eq "$(roots)" "$T/empty" &&
   { gs install -r "$T/nope" --watch 2>/dev/null; assert_eq $? 1; } &&
   { gs install -r "$T/empty" --bogus 2>/dev/null; assert_eq $? 2; } &&
@@ -1574,6 +1576,28 @@ test_watch_new_note_24h() {
   git config -f "$(sf_of "$T/p/x")" status.watchInstalled "$(date -v-25H +%Y-%m-%dT%H:%M:%S%z)" &&
   assert_not_contains "$(gs status)" "note: new" && assert_not_contains "$(gs status -v)" "new"
 }
+test_watch_new_note_when_blocked() {
+  make_repos && mkdir "$T/p" && gs install -r "$T/p" --watch >/dev/null &&
+  git clone -q "$T/remote.git" "$T/p/x" && git -C "$T/p/x" remote add dead "$T/nope.git" &&
+  quiet "$GS" sync --all &&
+  assert_contains "$(gs status)" "$(printf '%24sblocked by: fetch-failed:dead; note: new' '')"
+}
+test_watch_install_time_not_taken_from_other_fields() {
+  make_repos && mkdir "$T/p" && gs install -r "$T/p" --watch >/dev/null &&
+  git clone -q "$T/remote.git" "$T/p/x" && gs sync --all >/dev/null &&
+  wi=$(sget "$T/p/x" watchInstalled) &&
+  git config -f "$(sf_of "$T/p/x")" --add status.note "x: path/watchInstalled = garbage" &&
+  gs sync --all >/dev/null &&
+  assert_eq "$(sget "$T/p/x" watchInstalled)" "$wi"
+}
+test_uninstall_duplicate_listing() {
+  make_repos && mkdir "$T/p" && git clone -q "$T/remote.git" "$T/p/x" &&
+  gs install -r "$T/p" --watch >/dev/null &&
+  git config -f "$GIT_SYNC_HOME/config" --add sync.repo "$T/p/x" &&
+  out=$(gs uninstall "$T/p/x") && assert_contains "$out" "Uninstalled: $T/p/x" &&
+  assert_eq "$(git config -f "$GIT_SYNC_HOME/config" --get-all sync.repo)" "" &&
+  assert_eq "$(excludes)" "$T/p/x"
+}
 test_watch_uninstall_outside_root_no_exclusion() {
   make_repos && mkdir -p "$T/p/deep" && gs install -r "$T/p" --watch >/dev/null &&
   git clone -q "$T/remote.git" "$T/p/deep/x" && gs install "$T/p/deep/x" >/dev/null &&
@@ -1587,10 +1611,17 @@ test_watch_linked_worktrees() {
   gs install -r "$T/p" --watch >/dev/null 2>&1 && gs install -r "$T/q" --watch >/dev/null 2>&1 &&
   assert_eq "$(git config -f "$GIT_SYNC_HOME/config" --get-all sync.repo | sort)" "$(printf '%s\n%s' "$T/q/m" "$WORK" | sort)" &&
   gs uninstall "$WORK" >/dev/null && gs uninstall "$T/q/m" >/dev/null &&
-  assert_eq "$(excludes)" "$T/q/m" &&
+  assert_eq "$(excludes | sort)" "$(printf '%s\n%s' "$T/q/m" "$WORK" | sort)" &&
   gs sync --all >/dev/null &&
+  assert_eq "$(git config -f "$GIT_SYNC_HOME/config" --get-all sync.repo)" ""
+}
+test_watch_symlinked_child_excluded() {
+  make_repos && mkdir "$T/p q" && ln -s "$WORK" "$T/p q/link" &&
+  gs install -r "$T/p q" --watch >/dev/null &&
   assert_eq "$(git config -f "$GIT_SYNC_HOME/config" --get-all sync.repo)" "$WORK" &&
-  assert_contains "$(cat "$GIT_SYNC_HOME/git-sync.log")" "installed $WORK (watched root $T/p)"
+  out=$(gs uninstall "$WORK") && assert_contains "$out" "Excluded from watched root $T/p q" &&
+  assert_eq "$(excludes)" "$WORK" &&
+  gs sync --all >/dev/null && assert_eq "$(git config -f "$GIT_SYNC_HOME/config" --get-all sync.repo)" ""
 }
 test_config_jobs_jitter() {
   assert_eq "$(gs config sync.jobs)" 8 && assert_eq "$(gs config sync.jitter)" 5s &&

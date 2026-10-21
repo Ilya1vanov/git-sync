@@ -37,7 +37,7 @@ The test, made before a run touches any repo, of whether the machine has a defau
 _Avoid_: connectivity probe, reachability check
 
 **Offline skip**:
-A run that failed the offline check and left every repo and its status untouched.
+A run that failed the offline check and synced no repo: every repo and its existing status are left untouched. A watch scan before the check may still install new repos into the sync list.
 _Avoid_: skipped run, offline run
 
 **Offline streak**:
