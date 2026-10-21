@@ -728,12 +728,17 @@ test_sync_env_respects_core_sshcommand() {
   assert_contains "$a" "--marker" && assert_not_contains "$a" "BatchMode=yes"
 }
 # hang_stub [ignore-term]: fake ssh that never finishes. Its command line holds
-# $T/bin/ssh, a unique marker for leak checks (`marked`).
+# $T/bin/ssh, a unique marker for leak checks (`marked`). Once its traps are
+# set it creates $T/hang.<pid> (see `fetches`). It is run once with --warm
+# here, as macOS can take over a second to start a new script the first time,
+# long enough for a 1s fetch timeout to TERM it before it ignores TERM.
 hang_stub() {
   { echo '#!/bin/sh'
+    echo '[ "${1-}" != --warm ] || exit 0'
     [ "${1:-}" = ignore-term ] && echo "trap '' TERM"
+    echo ': > "$STUB_DIR/hang.$$"'
     echo 'while :; do sleep 1; done'; } > "$T/bin/ssh"
-  chmod +x "$T/bin/ssh"
+  chmod +x "$T/bin/ssh" && "$T/bin/ssh" --warm
 }
 # marked: PIDs of live processes carrying the stub marker or a sleeper of N seconds ($1).
 marked() { pgrep -f "$T/bin/ssh"; [ -z "${1:-}" ] || pgrep -fx "sleep $1"; }
@@ -842,11 +847,23 @@ poll() {
   local n=0
   until eval "$2"; do n=$((n + 1)); [ "$n" -lt "$1" ] || return 1; sleep 0.1; done
 }
-# fetches N: true once N hanging fetches (fake ssh processes) are in flight.
-fetches() { [ "$(marked | grep -c .)" -ge "$1" ]; }
-# leftovers: PIDs of live fake ssh, 53s sleepers, jitter sleeps (2 decimals) or workers.
+# fetches N: true once N hanging fetches (fake ssh processes past their trap
+# setup, so an ignore-term stub really ignores TERM) are in flight.
+fetches() {
+  local f n=0
+  for f in "$T"/hang.*; do
+    [ -e "$f" ] && kill -0 "${f##*.}" 2>/dev/null && n=$((n + 1))
+  done
+  [ "$n" -ge "$1" ]
+}
+# jitters: PIDs of live jitter sleeps (2 decimals) of the run started by
+# interrupted_run. Workers start them without job control, so they stay in the
+# run's process group, also when orphaned; a global match would catch the
+# sleeps of any other git-sync run on the machine (e.g. the installed agent).
+jitters() { pgrep -g "$RUN_PGID" -fx 'sleep [0-9]+\.[0-9][0-9]'; }
+# leftovers: PIDs of live fake ssh, 53s sleepers, jitter sleeps or workers.
 leftovers() {
-  marked 53; pgrep -fx 'sleep [0-9]+\.[0-9][0-9]'; pgrep -f "__sync-one.*$GIT_SYNC_HOME/run"
+  marked 53; jitters; pgrep -f "__sync-one.*$GIT_SYNC_HOME/run"
 }
 # interrupted_run READY SIG ARGS...: starts `git-sync ARGS` in the background
 # (own process group, like a terminal job; sync.fetchTimeout should be 53),
@@ -856,6 +873,7 @@ leftovers() {
 interrupted_run() {
   local ready=$1 sig=$2 pid rc; shift 2
   set -m; gs_ssh "$@" > "$T/int.out" 2>&1 & pid=$!; set +m
+  RUN_PGID=$pid
   poll 100 "$ready" || { echo "    never ready: $ready"; kill -KILL -"$pid"; return 1; }
   if [ "$sig" = INT ]; then kill -INT -"$pid"; else kill -TERM "$(cat "$GIT_SYNC_HOME/lock/pid")"; fi
   poll 80 '! kill -0 "$pid" 2>/dev/null' || { echo "    run still alive after $sig"; kill -KILL -"$pid"; return 1; }
@@ -925,7 +943,7 @@ test_interrupt_during_jitter_is_prompt() {
   gs config --global sync.jobs 2 && gs config --global sync.jitter 50 &&
   gs config --global sync.mode maintain-only || return 1
   for sig in TERM INT; do
-    interrupted_run '[ -n "$(pgrep -fx "sleep [0-9]+\.[0-9][0-9]")" ]' "$sig" sync --all || { echo "    ($sig)"; return 1; }
+    interrupted_run '[ -n "$(jitters)" ]' "$sig" sync --all || { echo "    ($sig)"; return 1; }
   done
 }
 test_interrupt_kills_foreground_child_of_stuck_worker() {
@@ -1607,8 +1625,10 @@ test_watch_empty_folder_and_already_watched() {
   mkdir "$T/empty" && ln -s "$T/empty" "$T/link" &&
   out=$(gs install -r "$T/empty" --watch) &&
   assert_contains "$out" "Watching: $T/empty" &&
+  make_repos && git clone -q "$T/remote.git" "$T/empty/new" &&
   out=$(cd "$T" && gs install -r link/ --watch) &&
-  assert_eq "$out" "Already watched: $T/empty" &&
+  assert_contains "$out" "Installed: $T/empty/new" &&
+  assert_contains "$out" "Already watched: $T/empty" && assert_not_contains "$out" "Watching:" &&
   assert_eq "$(roots)" "$T/empty" &&
   { gs install -r "$T/nope" --watch 2>/dev/null; assert_eq $? 1; } &&
   { gs install -r "$T/empty" --bogus 2>/dev/null; assert_eq $? 2; } &&
@@ -1730,6 +1750,28 @@ test_watch_new_note_24h() {
   git config -f "$(sf_of "$T/p/x")" status.watchInstalled "$(date -v-25H +%Y-%m-%dT%H:%M:%S%z)" &&
   assert_not_contains "$(gs status)" "note: new" && assert_not_contains "$(gs status -v)" "new"
 }
+test_watch_new_note_when_blocked() {
+  make_repos && mkdir "$T/p" && gs install -r "$T/p" --watch >/dev/null &&
+  git clone -q "$T/remote.git" "$T/p/x" && git -C "$T/p/x" remote add dead "$T/nope.git" &&
+  quiet "$GS" sync --all &&
+  assert_contains "$(gs status)" "$(printf '%24sblocked by: fetch-failed:dead; note: new' '')"
+}
+test_watch_install_time_not_taken_from_other_fields() {
+  make_repos && mkdir "$T/p" && gs install -r "$T/p" --watch >/dev/null &&
+  git clone -q "$T/remote.git" "$T/p/x" && gs sync --all >/dev/null &&
+  wi=$(sget "$T/p/x" watchInstalled) &&
+  git config -f "$(sf_of "$T/p/x")" --add status.note "x: path/watchInstalled = garbage" &&
+  gs sync --all >/dev/null &&
+  assert_eq "$(sget "$T/p/x" watchInstalled)" "$wi"
+}
+test_uninstall_duplicate_listing() {
+  make_repos && mkdir "$T/p" && git clone -q "$T/remote.git" "$T/p/x" &&
+  gs install -r "$T/p" --watch >/dev/null &&
+  git config -f "$GIT_SYNC_HOME/config" --add sync.repo "$T/p/x" &&
+  out=$(gs uninstall "$T/p/x") && assert_contains "$out" "Uninstalled: $T/p/x" &&
+  assert_eq "$(git config -f "$GIT_SYNC_HOME/config" --get-all sync.repo)" "" &&
+  assert_eq "$(excludes)" "$T/p/x"
+}
 test_watch_uninstall_outside_root_no_exclusion() {
   make_repos && mkdir -p "$T/p/deep" && gs install -r "$T/p" --watch >/dev/null &&
   git clone -q "$T/remote.git" "$T/p/deep/x" && gs install "$T/p/deep/x" >/dev/null &&
@@ -1743,10 +1785,17 @@ test_watch_linked_worktrees() {
   gs install -r "$T/p" --watch >/dev/null 2>&1 && gs install -r "$T/q" --watch >/dev/null 2>&1 &&
   assert_eq "$(git config -f "$GIT_SYNC_HOME/config" --get-all sync.repo | sort)" "$(printf '%s\n%s' "$T/q/m" "$WORK" | sort)" &&
   gs uninstall "$WORK" >/dev/null && gs uninstall "$T/q/m" >/dev/null &&
-  assert_eq "$(excludes)" "$T/q/m" &&
+  assert_eq "$(excludes | sort)" "$(printf '%s\n%s' "$T/q/m" "$WORK" | sort)" &&
   gs sync --all >/dev/null &&
+  assert_eq "$(git config -f "$GIT_SYNC_HOME/config" --get-all sync.repo)" ""
+}
+test_watch_symlinked_child_excluded() {
+  make_repos && mkdir "$T/p q" && ln -s "$WORK" "$T/p q/link" &&
+  gs install -r "$T/p q" --watch >/dev/null &&
   assert_eq "$(git config -f "$GIT_SYNC_HOME/config" --get-all sync.repo)" "$WORK" &&
-  assert_contains "$(cat "$GIT_SYNC_HOME/git-sync.log")" "installed $WORK (watched root $T/p)"
+  out=$(gs uninstall "$WORK") && assert_contains "$out" "Excluded from watched root $T/p q" &&
+  assert_eq "$(excludes)" "$WORK" &&
+  gs sync --all >/dev/null && assert_eq "$(git config -f "$GIT_SYNC_HOME/config" --get-all sync.repo)" ""
 }
 test_config_jobs_jitter() {
   assert_eq "$(gs config sync.jobs)" 8 && assert_eq "$(gs config sync.jitter)" 5s &&

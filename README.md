@@ -125,11 +125,14 @@ in the same run that installs it. The scan runs after taking the lock and
 before the offline check, so an offline skip still installs new repos and the
 next online run syncs them. `sync` and `sync <path>` never scan.
 
-- Watching a folder with no repos yet is fine; watching it again changes
-  nothing. Roots are stored as canonical absolute paths.
-- For 24 hours after a watch installs a repo, `status` shows a `new` note on it.
-  Repos you install yourself are never marked `new`.
-- `uninstall <repo>` on a repo directly inside a watched root records an
+- Watching a folder with no repos yet is fine. Watching it again installs any
+  new repos there right away and says it is already watched; the root is not
+  added twice. Roots are stored as canonical absolute paths.
+- For 24 hours after a watch installs a repo, `status` shows a `new` note on it,
+  also when the repo is blocked (`blocked by: ...; note: new`). Repos you
+  install yourself are never marked `new`.
+- `uninstall <repo>` on a repo that a watched root reaches (directly inside it,
+  or through a symlinked folder or a linked worktree inside it) records an
   *exclusion*, so the scan does not add it back, even after you delete and
   re-clone it. `install <repo>` removes the exclusion. An excluded main
   worktree also keeps its linked worktrees under a watched root out.
@@ -174,8 +177,10 @@ git-sync help
   checks for an IPv4 or IPv6 default network route (`route -n get -inet default`,
   then `-inet6`, which read the local routing table and make no network or DNS
   calls). Without one, the run
-  is an offline skip: no repo is fetched or changed, no status file is
-  rewritten, and `offline, run skipped` is logged at INFO. A job run then exits
+  is an offline skip: no repo is fetched or changed, no existing status file is
+  rewritten, and `offline, run skipped` is logged at INFO. (A `sync --all`
+  watch scan still runs first: it may install new repos and record their
+  install time in a new status file.) A job run then exits
   0 and sends no notification (neither `blocked` nor `finished`); a manual run
   prints `offline` and exits 1. Having a default route does not mean the
   remotes are reachable (captive portals, networks without internet), so such

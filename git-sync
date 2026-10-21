@@ -881,9 +881,16 @@ sync_maintenance() {
 
 # status_write REPO MODE: atomically rewrite the repo's status file from SYNC_* state.
 status_write() {
-  local repo=$1 mode=$2 sf tmp last line wi
+  local repo=$1 mode=$2 sf tmp last line wi=
   sf=$(status_file "$repo")
-  wi=$(status_field "$repo" watchInstalled)
+  # Carry the watch install time over; read with the shell, not a git process
+  # per repo per run (git writes it as "<tab>watchInstalled = <time>").
+  if [ -f "$sf" ]; then
+    while IFS= read -r line; do
+      # Anchored on the key: blocker/note values may contain the same text.
+      case "$line" in [[:blank:]]'watchInstalled = '*) wi=${line#*watchInstalled = } ;; esac
+    done < "$sf"
+  fi
   tmp="$GS_STATUS_DIR/.tmp.$$"
   mkdir -p "$GS_STATUS_DIR" || return 1
   if [ "$SYNC_RESULT" = ok ]; then
@@ -1231,33 +1238,91 @@ install_root() {
     return
   fi
   dir=$(cd -P "$ROOT_DIR" && pwd) || die "cannot read $ROOT_DIR"
+  # Also on an already-watched root, so a fresh clone is picked up right away.
+  install_children "$dir" 1 || rc=$?
   if root_watched "$dir"; then
     echo "Already watched: $dir"
+  else
+    git config -f "$GS_CONFIG" --add sync.root "$dir" || die "cannot write $GS_CONFIG"
+    log_msg INFO "watch: $dir"
+    echo "Watching: $dir"
+  fi
+  return "$rc"
+}
+
+# repo_children DIR: the immediate subdirectories of DIR that are git working
+# trees (have a .git dir or file), one per line. Hidden folders are skipped.
+# The one depth-1 rule shared by `install -r` and the watch scan.
+repo_children() {
+  local child
+  for child in "$1"/*/; do
+    child=${child%/}
+    [ -d "$child" ] && [ -e "$child/.git" ] && printf '%s\n' "$child"
+  done
+  return 0
+}
+
+# watched_root_of REPO: prints the watched root whose scan reaches REPO, directly
+# or through a child that resolves to it (symlink, linked worktree); rc 1 if none.
+watched_root_of() {
+  local root child
+  root=$(dirname "$1")
+  if root_watched "$root"; then
+    printf '%s\n' "$root"
     return 0
   fi
-  install_children "$dir" 1 || rc=$?
-  git config -f "$GS_CONFIG" --add sync.root "$dir" || die "cannot write $GS_CONFIG"
-  log_msg INFO "watch: $dir"
-  echo "Watching: $dir"
-  return "$rc"
+  while IFS= read -r root; do
+    [ -n "$root" ] || continue
+    while IFS= read -r child; do
+      [ -n "$child" ] || continue
+      if [ "$(resolve_repo "$child")" = "$1" ]; then
+        printf '%s\n' "$root"
+        return 0
+      fi
+    done <<EOF
+$(repo_children "$root")
+EOF
+  done <<EOF
+$(list_roots)
+EOF
+  return 1
+}
+
+# canon_path PATH: PATH with symlinks resolved; if PATH does not exist (or is
+# not a directory), only its parent is resolved.
+canon_path() {
+  local p parent
+  if p=$(cd -P "$1" 2>/dev/null && pwd); then
+    printf '%s\n' "$p"
+    return 0
+  fi
+  p=${1%/}
+  if parent=$(cd -P "$(dirname "$p")" 2>/dev/null && pwd); then
+    printf '%s/%s\n' "$parent" "$(basename "$p")"
+  else
+    printf '%s\n' "$p"
+  fi
 }
 
 # install_children DIR [ALLOW_EMPTY]: installs every immediate subdirectory of
 # DIR that is a git working tree (has a .git dir or file). Not recursive beyond
 # depth 1. ALLOW_EMPTY=1: finding no repos is not an error.
 install_children() {
-  local dir=$1 allow_empty=${2:-0} child repo out found=0 added=0 already=0 failed=0 excluded=0
+  local dir=$1 allow_empty=${2:-0} child repo out found=0 added=0 already=0 failed=0 excluded=0 excl nl='
+'
   [ -d "$dir" ] || die "not a directory: $dir"
-  for child in "$dir"/*/; do
-    child=${child%/}
-    [ -d "$child" ] && [ -e "$child/.git" ] || continue
+  # Read once; children are resolved only when there are exclusions to check.
+  excl=$(list_excludes)
+  while IFS= read -r child; do
+    [ -n "$child" ] || continue
     found=$((found + 1))
-    # Subshell: cmd_install calls die on failure; keep going with the rest.
     # Excluded repos stay out; only `install <repo>` brings one back.
-    if repo=$(resolve_repo "$child") && repo_excluded "$repo"; then
-      excluded=$((excluded + 1))
-      continue
+    if [ -n "$excl" ] && repo=$(resolve_repo "$child"); then
+      case "$nl$excl$nl" in
+        *"$nl$repo$nl"*) excluded=$((excluded + 1)); continue ;;
+      esac
     fi
+    # Subshell: cmd_install calls die on failure; keep going with the rest.
     if out=$(cmd_install "$child"); then
       echo "$out"
       case "$out" in
@@ -1267,14 +1332,16 @@ install_children() {
     else
       failed=$((failed + 1))
     fi
-  done
+  done <<EOF
+$(repo_children "$dir")
+EOF
   [ "$found" -gt 0 ] || [ "$allow_empty" = 1 ] || die "no git repositories found in $dir"
   echo "$added installed, $already already installed, $failed failed, $excluded excluded"
   [ "$failed" -eq 0 ]
 }
 
-# watch_scan: install every new repo found directly inside a watched root (same
-# child rules as install_children). Runs under the lock, so no duplicates.
+# watch_scan: install every new repo found directly inside a watched root
+# (repo_children, as `install -r`). Runs under the lock, so no duplicates.
 watch_scan() {
   local root child repo sf known nl='
 '
@@ -1288,16 +1355,18 @@ watch_scan() {
       [ "$GS_JOB" = 1 ] || warn "watched root missing or unreadable: $root"
       continue
     fi
-    for child in "$root"/*/; do
-      child=${child%/}
-      [ -d "$child" ] && [ -e "$child/.git" ] || continue
+    while IFS= read -r child; do
+      [ -n "$child" ] || continue
       case "$known" in *"$nl$child$nl"*) continue ;; esac
       if ! repo=$(resolve_repo "$child"); then
         log_msg WARN "skipped $child: not a usable repository (watched root $root)"
         continue
       fi
       case "$known" in *"$nl$repo$nl"*) continue ;; esac
-      git config -f "$GS_CONFIG" --add sync.repo "$repo" || continue
+      if ! git config -f "$GS_CONFIG" --add sync.repo "$repo" 2>/dev/null; then
+        log_msg WARN "could not install $repo (watched root $root): cannot write $GS_CONFIG"
+        continue
+      fi
       known="$known$repo$nl"
       log_msg INFO "installed $repo (watched root $root)"
       # Install time drives the 24h `new` note in status; status_write keeps it.
@@ -1305,22 +1374,19 @@ watch_scan() {
       mkdir -p "$GS_STATUS_DIR" && rm -f "$sf" &&
         git config -f "$sf" status.path "$repo" &&
         git config -f "$sf" status.watchInstalled "$(now)"
-    done
+    done <<EOF
+$(repo_children "$root")
+EOF
   done
 }
 
 # uninstall_root <dir> --watch: stop watching <dir>; its repos and exclusions stay.
 uninstall_root() {
-  local dir parent
+  local dir
   parse_root_args "usage: git-sync uninstall -r <dir> --watch" "$@"
   [ "$ROOT_WATCH" = 1 ] || usage_die "usage: git-sync uninstall -r <dir> --watch"
-  # The root may be gone already: canonicalize its parent instead.
-  if ! dir=$(cd -P "$ROOT_DIR" 2>/dev/null && pwd); then
-    dir=${ROOT_DIR%/}
-    if parent=$(cd -P "$(dirname "$dir")" 2>/dev/null && pwd); then
-      dir="$parent/$(basename "$dir")"
-    fi
-  fi
+  # The root may be gone already: canon_path then resolves only its parent.
+  dir=$(canon_path "$ROOT_DIR")
   root_watched "$dir" || die "not a watched root: $dir"
   git config -f "$GS_CONFIG" --fixed-value --unset-all sync.root "$dir" || die "cannot write $GS_CONFIG"
   log_msg INFO "unwatch: $dir"
@@ -1333,28 +1399,30 @@ cmd_uninstall() {
     uninstall_root "$@"
     return
   fi
-  local target=${1:-.} repo parent
+  local target=${1:-.} repo root=
   if [ -d "$target" ] && repo=$(resolve_repo "$target"); then
     :
   else
-    if parent=$(cd -P "$(dirname "$target")" 2>/dev/null && pwd); then
-      repo="$parent/$(basename "$target")"
-    else
-      repo=$target
-    fi
+    repo=$(canon_path "$target")
   fi
   repo_listed "$repo" || die "not in sync list: $repo"
-  git config -f "$GS_CONFIG" --fixed-value --unset sync.repo "$repo" || die "cannot write $GS_CONFIG"
+  # Reachable from a watched root: exclude it so the next scan doesn't add it
+  # back. Excluded before unlisting, so a concurrent scan (uninstall takes no
+  # lock) always sees it as listed or excluded, never as new.
+  if ! repo_excluded "$repo" && root=$(watched_root_of "$repo"); then
+    git config -f "$GS_CONFIG" --add sync.exclude "$repo" || die "cannot write $GS_CONFIG"
+    log_msg INFO "exclude: $repo"
+  else
+    root=
+  fi
+  # --unset-all: an install racing a watch scan (neither shares the run lock
+  # with the other's write) can list a repo twice.
+  git config -f "$GS_CONFIG" --fixed-value --unset-all sync.repo "$repo" || die "cannot write $GS_CONFIG"
   git -C "$repo" config --remove-section git-sync 2>/dev/null
   rm -f "$(status_file "$repo")"
   log_msg INFO "uninstall: $repo"
   echo "Uninstalled: $repo"
-  # Under a watched root (depth 1): exclude it so the next scan doesn't add it back.
-  if root_watched "$(dirname "$repo")" && ! repo_excluded "$repo"; then
-    git config -f "$GS_CONFIG" --add sync.exclude "$repo" || die "cannot write $GS_CONFIG"
-    log_msg INFO "exclude: $repo"
-    echo "Excluded from watched root $(dirname "$repo")"
-  fi
+  [ -z "$root" ] || echo "Excluded from watched root $root"
 }
 
 cmd_list() {
@@ -1738,10 +1806,11 @@ END {
       if (index(repo, home "/") == 1) shown = "~" substr(repo, length(home) + 1)
       blk = (repo, "blocker") in S ? S[repo, "blocker"] : ""
       nts = (repo, "note") in S ? S[repo, "note"] : ""
-      # `new`: installed by a watch less than 24h ago.
+      # `new`: installed by a watch less than 24h ago. Shown even when blocked.
+      isnew = 0
       if ((repo, "watchinstalled") in S) {
         e = iso2epoch(S[repo, "watchinstalled"])
-        if (e >= 0 && now - e < 86400) nts = "new" (nts != "" ? "\001" nts : "")
+        if (e >= 0 && now - e < 86400) { isnew = 1; nts = "new" (nts != "" ? "\001" nts : "") }
       }
       if (!verbose) {
         printf "%-8s %-14s %s\n", res, ago((repo, "lastrun") in S ? S[repo, "lastrun"] : ""), shown
@@ -1749,7 +1818,7 @@ END {
         if (blk != "") {
           cnt = split(blk, b, "\001"); line = ""
           for (q = 1; q <= cnt; q++) { sub(/ .*/, "", b[q]); line = line (q > 1 ? ", " : "") b[q] }
-          print ind "blocked by: " line
+          print ind "blocked by: " line (isnew ? "; note: new" : "")
         } else if (nts != "") {
           gsub("\001", "; ", nts); print ind "note: " nts
         }
