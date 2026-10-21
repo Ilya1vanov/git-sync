@@ -13,6 +13,14 @@ Only the latest commit on `main` is supported.
 
 git-sync runs as you, with your credentials. It does not sandbox git.
 
+- **The setup line trusts GitHub and `main`.** Piping `install.sh` to `sh`
+  runs whatever is on `main` (or on the `GIT_SYNC_REF` you give) at that
+  moment, downloaded over HTTPS from `raw.githubusercontent.com` and
+  `github.com`. There are no checksums, signatures or tagged releases; each
+  update by re-running the line trusts `main` again. To review first,
+  download `install.sh`, read it, then run it with `sh < install.sh` (it
+  still downloads the archive of the ref), or set up from a clone you have
+  read with `sh install.sh`.
 - **Repo config is trusted.** Every git command git-sync runs in a repo reads
   that repo's config, including `core.sshCommand`, credential helpers and
   hooks (a fast-forward of a checked-out branch runs `post-merge`). Anyone who

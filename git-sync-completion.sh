@@ -96,6 +96,7 @@ __git_sync_hints() {
     __git_sync_hint config "Show or change configuration"
     __git_sync_hint sync "Sync the current (or given) repo, or all listed repos"
     __git_sync_hint notifications "Show or toggle notifications"
+    __git_sync_hint --version "Show the installed commit and its date"
     __git_sync_hint help "Show help"
     return 0
   fi

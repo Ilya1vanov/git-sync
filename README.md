@@ -9,11 +9,19 @@ resets, stashes or commits. Anything that would need judgment is recorded as a
 Requirements: macOS, git >= 2.31. It is a single POSIX `sh` file with no other
 dependencies.
 
-## Install
+## Setup
 
 ```sh
-sh install.sh          # copies git-sync to ${PREFIX:-$HOME/.local/bin}
-                       #   and its completion to ~/.local/share/git-sync
+curl -fsSL https://raw.githubusercontent.com/Ilya1vanov/git-sync/main/install.sh | sh
+```
+
+This sets up `git-sync` in `${PREFIX:-$HOME/.local/bin}` and its completion in
+`${XDG_DATA_HOME:-$HOME/.local/share}/git-sync`. It needs no `sudo`
+(`PREFIX=<dir>` before `sh` picks another directory) and never edits your
+shell rc files. If the directory is not on your `PATH`, it prints the line to
+add to `~/.zprofile`. Then add repos and start the agent:
+
+```sh
 cd /path/to/repo
 git-sync install       # register the repo (repeat per repo)
 git-sync install -r ~/projects   # or: register every repo directly inside a folder
@@ -21,12 +29,34 @@ git-sync install -r ~/projects --watch   # ...and future clones there too (see W
 git-sync start         # write the LaunchAgent and load it
 ```
 
-`~/.local/bin` must be on your `PATH`. `git-sync start` is idempotent and also
-reloads the agent. Changing the global `sync.period` reloads it automatically.
+`git-sync start` is idempotent and also reloads the agent. Changing the
+global `sync.period` reloads it automatically.
+
+`git-sync --version` prints the commit you run and its date, for example
+`git-sync 1a2b3c4 (2026-10-21)`. Every `sync` logs it at INFO when it starts.
+
+## Update
+
+Re-run the setup line. It prints `git-sync updated <old> → <new>`, or
+`git-sync <commit> is up to date (reinstalled)` when nothing changed (the
+files are still rewritten, which repairs a deleted completion file). A loaded
+agent is reloaded onto the new copy; an agent that is not loaded stays off.
+If the agent ran a copy at another path (a different `PREFIX`), the installer
+says that copy still exists; it does not delete it. A failed download changes
+nothing and exits non-zero.
+
+To try a branch before it reaches `main`:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Ilya1vanov/git-sync/main/install.sh | GIT_SYNC_REF=<branch> sh
+```
+
+With `GIT_SYNC_REF` the installer prints `git-sync changed <old> → <new>`,
+since it cannot tell a newer commit from an older one.
 
 ## Shell completion
 
-`sh install.sh` copies `git-sync-completion.sh` to
+Setup copies `git-sync-completion.sh` to
 `${XDG_DATA_HOME:-$HOME/.local/share}/git-sync/` and prints one line to add
 to your shell's rc file. Enabling it is up to you; rc files are never edited.
 
@@ -160,7 +190,7 @@ git-sync start | stop
 git-sync config [--global] [--force] [--unset] [<key> [<value>]]
 git-sync sync [<path> | --all]
 git-sync notifications [enable|disable]
-git-sync help
+git-sync help | --version
 ```
 
 - `git-sync sync` syncs the current repo, `sync <path>` the repo containing
@@ -362,17 +392,31 @@ Editor". You may need to allow notifications for Script Editor in System
 Settings > Notifications. Delivery from a launchd agent is not guaranteed;
 failures are logged and ignored.
 
-## Uninstall
+## Removal
 
 ```sh
 git-sync stop                  # unload agent, remove the plist
-rm ~/.local/bin/git-sync
-rm -r ~/.local/share/git-sync
+rm "${PREFIX:-$HOME/.local/bin}/git-sync"
+rm -r "${XDG_DATA_HOME:-$HOME/.local/share}/git-sync"
 rm -r ~/.git-sync
 ```
 
 Optionally run `git-sync uninstall` in each repo first to drop its per-repo
-`git-sync.*` settings.
+`git-sync.*` settings. Remove the completion line from your rc file if you
+added it.
+
+## Development
+
+```sh
+git clone https://github.com/Ilya1vanov/git-sync.git
+cd git-sync
+sh install.sh          # sets up this clone's files, uncommitted changes included
+```
+
+`sh install.sh` from a clone sets up the local files instead of downloading
+them, stamped with the clone's commit, plus `-dirty` when the work tree has
+uncommitted changes. `./git-sync --version` straight from a clone prints
+`git-sync dev`. The setup line always downloads, even when run inside a clone.
 
 ## Tests
 

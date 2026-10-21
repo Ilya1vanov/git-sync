@@ -3,6 +3,10 @@
 set -u
 
 # ---- constants ----
+# Version stamp: filled in by GitHub source archives (export-subst in
+# .gitattributes) or by install.sh in dev mode; left as is, it reads "dev".
+GS_COMMIT='$Format:%H$'
+GS_DATE='$Format:%cs$'
 GS_HOME=${GIT_SYNC_HOME:-$HOME/.git-sync}
 GS_CONFIG="$GS_HOME/config"
 GS_STATUS_DIR="$GS_HOME/status"
@@ -29,6 +33,15 @@ usage_die() {
 }
 warn() { echo "git-sync: warning: $*" >&2; }
 now() { date +%Y-%m-%dT%H:%M:%S%z; }
+# Prints "<short hash>[-dirty] (<date>)", or "dev" while GS_COMMIT is unstamped.
+# The pattern must not be a complete placeholder, or git archive would fill it in.
+version_string() {
+  local h
+  case "$GS_COMMIT" in '$Format'*|'') echo dev; return 0 ;; esac
+  h=$(printf '%.7s' "$GS_COMMIT")
+  case "$GS_COMMIT" in *-dirty) h="$h-dirty" ;; esac
+  echo "$h ($GS_DATE)"
+}
 
 # ---- config ----
 cfg_known() {
@@ -1162,6 +1175,7 @@ Commands:
   sync [<path> | --all]        Sync the current (or given) repo, or all listed repos
   notifications [enable|disable]
                                Show or toggle notifications
+  --version                    Show the installed commit and its date
   help                         Show this help
 EOF
 }
@@ -1489,6 +1503,7 @@ cmd_sync() {
     entries=$repo
   fi
   log_rotate
+  log_msg INFO "git-sync $(version_string)"
   if ! lock_acquire; then
     log_msg INFO "another run in progress"
     echo "another run in progress"
@@ -1874,6 +1889,7 @@ case "$cmd" in
 esac
 case "$cmd" in
   help|-h|--help) cmd_help ;;
+  --version) echo "git-sync $(version_string)" ;;
   install) shift; cmd_install "$@" ;;
   uninstall) shift; cmd_uninstall "$@" ;;
   list) shift; cmd_list "$@" ;;
