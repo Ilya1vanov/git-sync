@@ -2,3 +2,5 @@
 docs/superpowers
 .superpowers/
 .claude/worktrees
+.DS_Store
+.claude/settings.local.json
