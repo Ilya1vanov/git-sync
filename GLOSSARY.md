@@ -11,6 +11,22 @@ One invocation of `git-sync sync`, covering one repo or every registered repo.
 The repos a run with `--all` covers. _Install_ is the verb for adding a repo to it.
 _Avoid_: register
 
+**Install**:
+Adding a repo to the sync list (`git-sync install`).
+_Avoid_: install for placing git-sync itself on a machine (that is setup)
+
+**Setup**:
+Placing git-sync on a machine, with the one-line installer or `sh install.sh` from a clone.
+_Avoid_: install
+
+**Update**:
+Re-running setup to get newer code. A loaded agent is reloaded onto the new copy.
+_Avoid_: upgrade
+
+**Removal**:
+Taking git-sync off a machine.
+_Avoid_: uninstall
+
 **Watched root**:
 A folder whose depth-1 repos are added to the sync list automatically at each run with `--all`.
 

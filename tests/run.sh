@@ -92,6 +92,23 @@ gs() {
     git config -f "$GIT_SYNC_HOME/config" sync.jitter 0
   fi
 }
+# make_src: commits git-sync's distributed files into a fresh repo $T/src.
+make_src() {
+  mkdir -p "$T/src" &&
+  cp "$ROOT/git-sync" "$ROOT/git-sync-completion.sh" "$ROOT/install.sh" "$ROOT/.gitattributes" "$T/src/" &&
+  git -C "$T/src" init -q && git -C "$T/src" add -A && git -C "$T/src" commit -qm src
+}
+# make_archive: make_src, then $T/archive.tar.gz from git archive (so export-subst
+# stamps it), laid out like a GitHub archive (top dir git-sync-main/).
+make_archive() {
+  make_src && git -C "$T/src" archive --prefix=git-sync-main/ -o "$T/archive.tar.gz" HEAD
+}
+# oneliner: runs install.sh in one-liner mode ($0 is the shell) from $T/archive.tar.gz
+# into "$T/b in" and $T/share.
+oneliner() {
+  GIT_SYNC_ARCHIVE_URL="file://$T/archive.tar.gz" PREFIX="$T/b in" XDG_DATA_HOME="$T/share" \
+    sh < "$ROOT/install.sh"
+}
 # quiet CMD...: run, discard output, always succeed (for steps whose exit code is not under test).
 quiet() { "$@" >/dev/null 2>&1; return 0; }
 # hints_in SHELL WORD...: prints __git_sync_hints output for WORDs, run in SHELL (bash|zsh).
@@ -223,8 +240,89 @@ test_notifications_enable_on_fresh_home() {
 }
 test_install_sh_copies() {
   PREFIX="$T/bin2" sh "$ROOT/install.sh" >/dev/null && [ -x "$T/bin2/git-sync" ] &&
-  cmp -s "$T/bin2/git-sync" "$GS" &&
+  assert_contains "$("$T/bin2/git-sync" --version)" "git-sync $(printf %.7s "$(git -C "$ROOT" rev-parse HEAD)")" &&
   PREFIX="$T/bin2" sh "$ROOT/install.sh" >/dev/null
+}
+test_version_unstamped_is_dev_and_creates_no_home() {
+  assert_eq "$(gs --version)" "git-sync dev" && assert_no_file "$GIT_SYNC_HOME" &&
+  assert_contains "$(gs help)" "--version"
+}
+test_sync_logs_version() {
+  make_repos && gs sync "$WORK" >/dev/null 2>&1 &&
+  assert_contains "$(cat "$GIT_SYNC_HOME/git-sync.log")" "INFO git-sync dev"
+}
+test_install_sh_dev_stamps_hash_and_dirty() {
+  make_src && h=$(printf %.7s "$(git -C "$T/src" rev-parse HEAD)") &&
+  d=$(git -C "$T/src" log -1 --format=%cs) &&
+  out=$(PREFIX="$T/b in" XDG_DATA_HOME="$T/share" sh "$T/src/install.sh") &&
+  assert_contains "$out" "Set up git-sync $h ($d) in $T/b in/git-sync" &&
+  assert_eq "$("$T/b in/git-sync" --version)" "git-sync $h ($d)" &&
+  echo >> "$T/src/git-sync-completion.sh" &&
+  out=$(PREFIX="$T/b in" XDG_DATA_HOME="$T/share" sh "$T/src/install.sh") &&
+  assert_contains "$out" "git-sync changed $h ($d) → $h-dirty ($d)" &&
+  assert_eq "$("$T/b in/git-sync" --version)" "git-sync $h-dirty ($d)"
+}
+test_install_sh_oneliner_stamps_archive() {
+  make_archive && h=$(printf %.7s "$(git -C "$T/src" rev-parse HEAD)") &&
+  d=$(git -C "$T/src" log -1 --format=%cs) &&
+  out=$(oneliner) && assert_contains "$out" "Set up git-sync $h ($d)" &&
+  assert_eq "$("$T/b in/git-sync" --version)" "git-sync $h ($d)" &&
+  cmp -s "$T/share/git-sync/git-sync-completion.sh" "$COMP"
+}
+test_install_sh_oneliner_ignores_cwd_clone() {
+  make_archive && h=$(printf %.7s "$(git -C "$T/src" rev-parse HEAD)") &&
+  printf '#!/bin/sh\necho local copy\n' > "$T/src/git-sync" &&
+  out=$(cd "$T/src" && oneliner) &&
+  assert_contains "$("$T/b in/git-sync" --version)" "git-sync $h (" &&
+  assert_not_contains "$(cat "$T/b in/git-sync")" "local copy"
+}
+test_install_sh_rerun_messages() {
+  make_archive &&
+  a=$(printf %.7s "$(git -C "$T/src" rev-parse HEAD)") && d=$(git -C "$T/src" log -1 --format=%cs) &&
+  oneliner >/dev/null && rm "$T/share/git-sync/git-sync-completion.sh" &&
+  assert_contains "$(oneliner)" "git-sync $a is up to date (reinstalled)" &&
+  assert_file "$T/share/git-sync/git-sync-completion.sh" &&
+  git -C "$T/src" commit -q --allow-empty -m next && b=$(printf %.7s "$(git -C "$T/src" rev-parse HEAD)") &&
+  git -C "$T/src" archive --prefix=git-sync-main/ -o "$T/archive.tar.gz" HEAD &&
+  assert_contains "$(oneliner)" "git-sync updated $a ($d) → $b ($d)" &&
+  git -C "$T/src" archive --prefix=git-sync-old/ -o "$T/archive.tar.gz" HEAD~1 &&
+  assert_contains "$(GIT_SYNC_REF=old oneliner)" "git-sync changed $b ($d) → $a ($d)"
+}
+test_install_sh_path_hint() {
+  make_archive &&
+  out=$(PATH="/usr/bin:/bin" oneliner) &&
+  assert_contains "$out" "$T/b in is not in your PATH" &&
+  assert_contains "$out" "  export PATH=\"$T/b in:\$PATH\"" &&
+  out=$(PATH="/usr/bin:$T/b in:/bin" oneliner) &&
+  assert_not_contains "$out" "PATH"
+}
+test_install_sh_agent_not_loaded_not_started() {
+  make_archive && out=$(oneliner) &&
+  assert_not_contains "$out" "agent" &&
+  assert_not_contains "$(cat "$T/launchctl.calls")" "bootstrap" &&
+  assert_no_file "$GIT_SYNC_AGENTS_DIR/com.git-sync.agent.plist"
+}
+test_install_sh_reloads_loaded_agent() {
+  make_archive && p="$GIT_SYNC_AGENTS_DIR/com.git-sync.agent.plist" &&
+  oneliner >/dev/null && "$T/b in/git-sync" start >/dev/null &&
+  out=$(oneliner) &&
+  assert_contains "$out" "Reloading the agent onto $T/b in/git-sync" &&
+  assert_contains "$out" "Started (every 20m)" && assert_not_contains "$out" "Note:" &&
+  assert_eq "$(grep -c '^bootstrap' "$T/launchctl.calls")" 2 &&
+  out=$(GIT_SYNC_ARCHIVE_URL="file://$T/archive.tar.gz" PREFIX="$T/new" sh < "$ROOT/install.sh") &&
+  assert_eq "$(plutil -extract ProgramArguments.0 raw "$p")" "$T/new/git-sync" &&
+  assert_contains "$out" "Note: the agent ran $T/b in/git-sync before; that copy still exists." &&
+  assert_eq "$(grep -c '^bootstrap' "$T/launchctl.calls")" 3
+}
+test_install_sh_failed_download_keeps_setup() {
+  make_archive && oneliner >/dev/null &&
+  cp "$T/b in/git-sync" "$T/before" &&
+  GIT_SYNC_ARCHIVE_URL="file://$T/missing.tar.gz" PREFIX="$T/b in" XDG_DATA_HOME="$T/share" \
+    sh < "$ROOT/install.sh" >/dev/null 2>"$T/err"; rc=$?
+  [ "$rc" -ne 0 ] && assert_contains "$(cat "$T/err")" "download failed" &&
+  cmp -s "$T/b in/git-sync" "$T/before" &&
+  assert_eq "$(ls "$T/b in")" "git-sync" &&
+  assert_eq "$(ls "$T/share/git-sync")" "git-sync-completion.sh"
 }
 
 test_config_get_defaults() {
@@ -1871,7 +1969,7 @@ test_stale_runfile_removed() {
 }
 test_hints_commands() {
   out=$(hints) &&
-  assert_eq "$(echo "$out" | cut -f1 | tr '\n' ' ')" "install uninstall list status start stop config sync notifications help " &&
+  assert_eq "$(echo "$out" | cut -f1 | tr '\n' ' ')" "install uninstall list status start stop config sync notifications --version help " &&
   assert_contains "$out" "$(printf 'sync\tSync the current (or given) repo, or all listed repos')" &&
   assert_not_contains "$out" "__sync-one"
 }
@@ -2022,7 +2120,7 @@ test_install_sh_completion() {
   f="$T/share/git-sync/git-sync-completion.sh" &&
   out=$(PREFIX="$T/bin2" XDG_DATA_HOME="$T/share" sh "$ROOT/install.sh") &&
   [ -x "$T/bin2/git-sync" ] && cmp -s "$f" "$COMP" &&
-  assert_contains "$out" "Installed $f" &&
+  assert_contains "$out" "Set up git-sync " && assert_contains "$out" " and $f" &&
   assert_contains "$out" "[ -f \"$f\" ] && . \"$f\"" &&
   assert_contains "$out" "Next: run 'git-sync install' inside a repo, then 'git-sync start'." &&
   PREFIX="$T/bin2" XDG_DATA_HOME="$T/share" sh "$ROOT/install.sh" >/dev/null &&
