@@ -185,7 +185,7 @@ Only watch folders where you clone repos you trust.
 ```
 git-sync install [<path>] | install -r <dir> [--watch] | uninstall [<path>] | list [--watch]
 git-sync uninstall -r <dir> --watch
-git-sync status [--verbose] [--list-order]
+git-sync status [<path> | --all [--verbose] [--list-order]]
 git-sync start | stop
 git-sync config [--global] [--force] [--unset] [<key> [<value>]]
 git-sync sync [<path> | --all]
@@ -306,12 +306,17 @@ when Git's own thresholds say so. Git's maintenance scheduler
 ## Status and logs
 
 ```sh
-git-sync status            # agent state, period, notifications, then per repo:
+git-sync status            # the repo containing the current directory: its path,
+                           #   then mode, result, last run/success, every blocker
+                           #   with its detail, every note, and a "watched root:"
+                           #   line if it is in the sync list (-v is accepted, no effect)
+git-sync status <path>     # the same for the repo containing <path>
+git-sync status --all      # agent state, period, notifications, then per repo:
                            #   <result> <last run, time ago> <path>, plus
                            #   blocker keys (or notes) on a second line
-git-sync status --verbose  # full per-repo detail: mode, last run/success,
+git-sync status --all -v   # full per-repo detail: mode, last run/success,
                            #   every blocker with its detail, every note
-git-sync status -l         # keep sync-list order (default: blocked, error,
+git-sync status --all -l   # keep sync-list order (default: blocked, error,
                            #   missing first, then the rest; combines with -v)
 git-sync list              # one line per repo: path, mode, last result, then
                            #   "Watched roots:" and "Excluded:" sections if any
@@ -335,8 +340,29 @@ pending  never          ~/projects/new
 `pending` means the repo is registered but has not been synced yet. `new`
 marks a repo a watched root installed less than 24 hours ago.
 
-During an offline streak (consecutive offline skips), the header shows one more
-line after `Notifications:`:
+The local report (`status` / `status <path>`) shows one of four states, first
+match wins, and always exits 0. The repo path (main worktree, full) comes first.
+
+| State | Meaning | Output after the path |
+|---|---|---|
+| in the sync list | `pending`, `ok`, `blocked` or `error` | the per-repo detail block |
+| excluded | removed from a watched root, or still excluded after the root was removed | `excluded from watched root <root> (run 'git-sync install' to add it back)`; without a watched parent: `excluded (run 'git-sync install' to add it back)` |
+| pending watch install | parent directory is a watched root; not listed, not excluded | `watched (<root>), not installed yet: the next 'sync --all' installs it` |
+| not installed | none of the above | `not installed (run 'git-sync install')` |
+
+For the first and third states (in the sync list, pending watch install) the
+report ends with warnings when the shown status may be stale: `agent not
+loaded` if the launchd agent is not loaded, and `offline: skipped since <first
+skip> (last <latest skip>)` during an offline streak (same values as the
+`Offline:` line of `status --all`). Excluded and not-installed repos show
+neither.
+
+Pending watch install is decided by the parent-directory check only, a cheap
+approximation of the watch scan. A missing git-sync home reads as `not
+installed` and is not created.
+
+During an offline streak (consecutive offline skips), the `status --all` header
+shows one more line after `Notifications:`:
 
 ```
 Offline:       skipped since <first skip> (last <latest skip>)

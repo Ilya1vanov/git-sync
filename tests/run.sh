@@ -207,7 +207,7 @@ test_sync_creates_home_private() {
 }
 test_read_commands_on_fresh_home_create_nothing() {
   assert_eq "$(gs list)" "No repos." &&
-  assert_contains "$(gs status)" "No repos." &&
+  assert_contains "$(gs status --all)" "No repos." &&
   assert_eq "$(gs config sync.period)" 20m &&
   assert_contains "$(gs config)" "sync.period = 20m (default)" &&
   assert_contains "$(gs notifications)" "disabled" &&
@@ -656,15 +656,15 @@ test_offline_zero_repos_keeps_streak() {
 }
 test_offline_streak_status_and_cleared() {
   make_repos && gs install "$WORK" >/dev/null || return 1
-  assert_not_contains "$(gs status)" "Offline:" || return 1
+  assert_not_contains "$(gs status --all)" "Offline:" || return 1
   git config -f "$GIT_SYNC_HOME/state" offline.since 2000-01-01T00:00:00+0000 &&
   git config -f "$GIT_SYNC_HOME/state" offline.lastSkip 2000-01-02T00:00:00+0000 || return 1
-  out=$(gs status)
+  out=$(gs status --all)
   assert_eq "$(printf '%s\n' "$out" | sed -n 4p)" \
     "Offline:       skipped since 2000-01-01T00:00:00+0000 (last 2000-01-02T00:00:00+0000)" || return 1
   gs sync --all >/dev/null
   assert_eq "$(streak_get since)$(streak_get lastSkip)" "" && assert_eq "$(sget "$WORK" result)" ok &&
-  assert_not_contains "$(gs status)" "Offline:"
+  assert_not_contains "$(gs status --all)" "Offline:"
 }
 test_offline_lock_held_reports_in_progress() {
   make_repos && gs install "$WORK" >/dev/null && touch "$T/offline" || return 1
@@ -729,7 +729,7 @@ test_offline_streak_kept_when_unchecked_and_nothing_synced() {
 }
 test_offline_status_without_last_skip() {
   mkdir -p "$GIT_SYNC_HOME" && git config -f "$GIT_SYNC_HOME/state" offline.since 2000-01-01T00:00:00+0000 || return 1
-  assert_contains "$(gs status)" \
+  assert_contains "$(gs status --all)" \
     "Offline:       skipped since 2000-01-01T00:00:00+0000 (last 2000-01-01T00:00:00+0000)"
 }
 test_offline_streak_write_failure_warns() {
@@ -859,7 +859,7 @@ test_fetch_timeout_hung_remote() {
   assert_eq "$(git -C "$WORK" rev-parse develop)" "$old" &&
   git -C "$WORK" rev-parse -q --verify refs/remotes/up/develop >/dev/null &&
   assert_eq "$(marked)" "" &&
-  assert_contains "$(gs status -v)" "  blocker:       fetch-timeout:origin timed out after 2s" &&
+  assert_contains "$(gs status --all -v)" "  blocker:       fetch-timeout:origin timed out after 2s" &&
   assert_not_contains "$(cat "$GIT_SYNC_HOME/git-sync.log")" "Terminated" || return 1
   git -C "$WORK" remote set-url origin "$T/remote.git" &&
   (cd "$WORK" && gs_ssh sync >/dev/null) && assert_eq "$(blockers)" "" &&
@@ -1545,11 +1545,11 @@ test_period_change_without_agent_does_not_start() {
 }
 test_status_output() {
   make_repos && gs install "$WORK" >/dev/null &&
-  out=$(gs status --verbose) && assert_contains "$out" "Agent:         not loaded" &&
+  out=$(gs status --all --verbose) && assert_contains "$out" "Agent:         not loaded" &&
   assert_contains "$out" "Period:        20m" && assert_contains "$out" "Notifications: disabled" &&
   assert_contains "$out" "  result:        never" &&
   push_commit main && git -C "$WORK" remote add dead "$T/nope.git" && (cd "$WORK" && gs sync >/dev/null);
-  gs start >/dev/null && out=$(gs status --verbose) && assert_contains "$out" "Agent:         loaded" &&
+  gs start >/dev/null && out=$(gs status --all --verbose) && assert_contains "$out" "Agent:         loaded" &&
   assert_contains "$out" "$WORK" && assert_contains "$out" "  mode:          fast-forward" &&
   assert_contains "$out" "  result:        blocked" && assert_contains "$out" "  blocker:       fetch-failed:dead" &&
   assert_contains "$out" "  note:          main: skipped (checked out)" && assert_contains "$out" "  last run:"
@@ -1560,7 +1560,7 @@ test_status_compact() {
   git clone -q "$T/remote.git" "$T/gone" && gs install "$T/gone" >/dev/null && rm -rf "$T/gone" &&
   push_commit main && git -C "$WORK" remote add dead "$T/nope.git" && quiet "$GS" sync --all &&
   git clone -q "$T/remote.git" "$T/fresh" && gs install "$T/fresh" >/dev/null &&
-  out=$(gs status) &&
+  out=$(gs status --all) &&
   assert_contains "$out" "Notifications: disabled" &&
   assert_not_contains "$out" "  mode:" && assert_not_contains "$out" "last success" &&
   # result, time-ago, path in aligned columns; blockers win over notes on line 2
@@ -1581,7 +1581,7 @@ test_status_time_ago() {
   for spec in "-30S|< 1m ago" "-1M|1 minute ago" "-5M|5 minutes ago" "-1H|1 hour ago" \
               "-23H|23 hours ago" "-1d|1 day ago" "-40d|40 days ago"; do
     git config -f "$sf" status.lastRun "$(date -v"${spec%%|*}" +%Y-%m-%dT%H:%M:%S%z)" &&
-    assert_contains "$(gs status)" "ok       $(printf '%-14s' "${spec#*|}") $WORK" || return 1
+    assert_contains "$(gs status --all)" "ok       $(printf '%-14s' "${spec#*|}") $WORK" || return 1
   done
 }
 test_sync_path_argument() {
@@ -1609,22 +1609,154 @@ test_status_attention_first_default() {
   git clone -q "$T/remote.git" "$T/c" && gs install "$T/c" >/dev/null &&
   git -C "$T/c" remote add dead "$T/nope.git" && quiet "$GS" sync --all && rm -rf "$T/gone" &&
   # default: blocked, then error, then missing, then the rest in list order
-  order=$(gs status | sed -En 's/^[a-z]+ +(< 1m ago|never) +(\/.*)$/\2/p' | tr '\n' ' ') &&
+  order=$(gs status --all | sed -En 's/^[a-z]+ +(< 1m ago|never) +(\/.*)$/\2/p' | tr '\n' ' ') &&
   assert_eq "$order" "$T/c $T/gone $T/a $T/b " &&
   # --list-order keeps the sync list order
-  order=$(gs status --list-order | sed -En 's/^[a-z]+ +(< 1m ago|never) +(\/.*)$/\2/p' | tr '\n' ' ') &&
+  order=$(gs status --all --list-order | sed -En 's/^[a-z]+ +(< 1m ago|never) +(\/.*)$/\2/p' | tr '\n' ' ') &&
   assert_eq "$order" "$T/a $T/b $T/gone $T/c " &&
-  out=$(gs status --verbose) && assert_eq "$(printf '%s\n' "$out" | sed -n '4p')" "$T/c" &&
-  out=$(gs status -l -v) && assert_eq "$(printf '%s\n' "$out" | sed -n '4p')" "$T/a" &&
-  { gs status --blocked-first 2>/dev/null; assert_eq $? 2; }
+  out=$(gs status --all --verbose) && assert_eq "$(printf '%s\n' "$out" | sed -n '4p')" "$T/c" &&
+  out=$(gs status --all -l -v) && assert_eq "$(printf '%s\n' "$out" | sed -n '4p')" "$T/a" &&
+  { gs status --all --blocked-first 2>/dev/null; assert_eq $? 2; }
 }
 test_status_compact_tilde_and_bad_flag() {
   git init -q "$HOME/proj" && gs install "$HOME/proj" >/dev/null &&
-  assert_contains "$(gs status)" "pending  never          ~/proj" &&
-  { gs status --bogus 2>/dev/null; assert_eq $? 2; }
+  assert_contains "$(gs status --all)" "pending  never          ~/proj" &&
+  { gs status --all --bogus 2>/dev/null; assert_eq $? 2; }
+}
+# --- local status ---
+test_status_local_installed_ok() {
+  make_repos "sp ace: x" && gs install "$WORK" >/dev/null && quiet "$GS" sync --all &&
+  cd "$WORK" && out=$(gs status) &&
+  assert_eq "$(printf '%s\n' "$out" | sed -n 1p)" "$WORK" &&
+  assert_contains "$out" "  mode:          fast-forward" && assert_contains "$out" "  result:        ok" &&
+  assert_contains "$out" "  last run:      20" && assert_contains "$out" "  last success:  20" &&
+  assert_not_contains "$out" "Agent:" && assert_not_contains "$out" "Period:" &&
+  assert_not_contains "$out" "watched root:" &&
+  assert_eq "$(gs status -v)" "$out"
+}
+test_status_local_pending_and_path_arg() {
+  make_repos && gs install "$WORK" >/dev/null && mkdir "$WORK/sub" && cd "$T" &&
+  out=$(gs status "$WORK/sub") &&
+  assert_contains "$out" "$WORK
+  mode:          fast-forward
+  result:        never
+  last run:      never
+  last success:  never" &&
+  mkdir "$T/plain" &&
+  { gs status "$T/plain" 2>"$T/err"; assert_eq $? 1; } &&
+  assert_contains "$(cat "$T/err")" "not a git repository: $T/plain"
+}
+test_status_local_blocked_details() {
+  make_repos && gs install "$WORK" >/dev/null && push_commit main &&
+  git -C "$WORK" remote add dead "$T/nope.git" && quiet "$GS" sync --all &&
+  cd "$WORK" && out=$(gs status) &&
+  assert_contains "$out" "  result:        blocked" &&
+  assert_contains "$out" "  blocker:       fetch-failed:dead" &&
+  assert_contains "$out" "  note:          main: skipped (checked out)"
+}
+test_status_local_linked_worktree() {
+  make_repos && gs install "$WORK" >/dev/null && git -C "$WORK" worktree add -q "$T/wt" -b wtb &&
+  cd "$T/wt" && out=$(gs status) && assert_eq "$(printf '%s\n' "$out" | sed -n 1p)" "$WORK" &&
+  assert_contains "$out" "  result:        never"
+}
+test_status_local_watched_root() {
+  make_repos && mkdir "$T/p" && gs install -r "$T/p" --watch >/dev/null &&
+  git clone -q "$T/remote.git" "$T/p/x" && quiet "$GS" sync --all &&
+  cd "$T/p/x" && out=$(gs status) &&
+  assert_eq "$(printf '%s\n' "$out" | sed -n 1p)" "$T/p/x" &&
+  assert_contains "$out" "  watched root:  $T/p" && assert_contains "$out" "  note:          new"
+}
+test_status_local_not_installed() {
+  make_repos && cd "$WORK" && out=$(gs status) &&
+  assert_eq "$out" "$(printf '%s\nnot installed (run '"'git-sync install'"')' "$WORK")"
+}
+test_status_local_pending_watch_install() {
+  make_repos && touch "$T/loaded" && mkdir "$T/p" && gs install -r "$T/p" --watch >/dev/null &&
+  git clone -q "$T/remote.git" "$T/p/x" && cd "$T/p/x" && out=$(gs status) &&
+  assert_eq "$out" "$(printf '%s\nwatched (%s), not installed yet: the next '"'sync --all'"' installs it' "$T/p/x" "$T/p")"
+}
+test_status_local_excluded() {
+  make_repos && mkdir "$T/p" && gs install -r "$T/p" --watch >/dev/null &&
+  git clone -q "$T/remote.git" "$T/p/x" && gs install "$T/p/x" >/dev/null &&
+  gs uninstall "$T/p/x" >/dev/null && cd "$T/p/x" && out=$(gs status) &&
+  assert_eq "$out" "$(printf '%s\nexcluded from watched root %s (run '"'git-sync install'"' to add it back)' "$T/p/x" "$T/p")" &&
+  gs uninstall -r "$T/p" --watch >/dev/null && out=$(gs status) &&
+  assert_eq "$out" "$(printf '%s\nexcluded (run '"'git-sync install'"' to add it back)' "$T/p/x")"
+}
+test_status_local_outside_repo_and_flags() {
+  mkdir "$T/plain" && cd "$T/plain" &&
+  { gs status 2>"$T/err"; assert_eq $? 2; } &&
+  assert_contains "$(cat "$T/err")" "not in a git repository; use 'git-sync status --all'" &&
+  make_repos && cd "$WORK" &&
+  { gs status --all "$WORK" 2>/dev/null; assert_eq $? 2; } &&
+  { gs status -l 2>/dev/null; assert_eq $? 2; } &&
+  { gs status "$WORK" "$WORK" 2>/dev/null; assert_eq $? 2; } &&
+  gs status -v >/dev/null && gs status --verbose >/dev/null
+}
+test_status_local_exit_zero_and_home_not_created() {
+  make_repos && rm -rf "$GIT_SYNC_HOME" && cd "$WORK" &&
+  out=$(gs status) && assert_contains "$out" "not installed" &&
+  assert_no_file "$GIT_SYNC_HOME" && gs status --all >/dev/null && assert_no_file "$GIT_SYNC_HOME"
+}
+test_status_local_states_full_paths_with_spaces_and_colons() {
+  make_repos && touch "$T/loaded" && R="$T/ro ot: a" && mkdir "$R" && gs install -r "$R" --watch >/dev/null &&
+  git clone -q "$T/remote.git" "$R/pend: 1" && git clone -q "$T/remote.git" "$R/exc: 2" &&
+  gs install "$R/exc: 2" >/dev/null && gs uninstall "$R/exc: 2" >/dev/null &&
+  out=$(gs status "$R/pend: 1") &&
+  assert_eq "$out" "$(printf '%s\nwatched (%s), not installed yet: the next '"'sync --all'"' installs it' "$R/pend: 1" "$R")" &&
+  out=$(gs status "$R/exc: 2") &&
+  assert_eq "$out" "$(printf '%s\nexcluded from watched root %s (run '"'git-sync install'"' to add it back)' "$R/exc: 2" "$R")" &&
+  git clone -q "$T/remote.git" "$T/lo ne: 3" &&
+  assert_eq "$(gs status "$T/lo ne: 3")" "$(printf '%s\nnot installed (run '"'git-sync install'"')' "$T/lo ne: 3")" &&
+  gs install "$R/exc: 2" >/dev/null && quiet "$GS" sync --all &&
+  out=$(gs status "$R/exc: 2") && assert_contains "$out" "  watched root:  $R"
+}
+test_status_local_excluded_beats_pending_watch_install() {
+  make_repos && mkdir "$T/p" && gs install -r "$T/p" --watch >/dev/null &&
+  git clone -q "$T/remote.git" "$T/p/x" &&
+  assert_contains "$(gs status "$T/p/x")" "watched ($T/p), not installed yet" &&
+  gs install "$T/p/x" >/dev/null && gs uninstall "$T/p/x" >/dev/null &&
+  out=$(gs status "$T/p/x") && assert_contains "$out" "excluded from watched root" &&
+  assert_not_contains "$out" "not installed yet"
+}
+test_status_local_listed_beats_excluded() {
+  make_repos && mkdir "$T/p" && gs install -r "$T/p" --watch >/dev/null &&
+  git clone -q "$T/remote.git" "$T/p/x" && gs install "$T/p/x" >/dev/null &&
+  out=$(gs status "$T/p/x") && assert_contains "$out" "  result:        never" &&
+  assert_not_contains "$out" "excluded"
+}
+test_status_local_warnings() {
+  make_repos && mkdir "$T/p" && gs install "$WORK" >/dev/null &&
+  gs install -r "$T/p" --watch >/dev/null && git clone -q "$T/remote.git" "$T/p/x" &&
+  git clone -q "$T/remote.git" "$T/n" || return 1
+  # agent not loaded: listed and pending watch install
+  assert_contains "$(gs status "$WORK")" "agent not loaded" &&
+  assert_contains "$(gs status "$T/p/x")" "agent not loaded" &&
+  assert_not_contains "$(gs status "$T/n")" "agent not loaded" || return 1
+  # excluded: no warnings
+  gs install "$T/p/x" >/dev/null && gs uninstall "$T/p/x" >/dev/null &&
+  assert_contains "$(gs status "$T/p/x")" "excluded" &&
+  assert_not_contains "$(gs status "$T/p/x")" "agent not loaded" || return 1
+  # agent loaded, no streak: no warning
+  touch "$T/loaded" &&
+  assert_not_contains "$(gs status "$WORK")" "agent not loaded" &&
+  assert_not_contains "$(gs status "$WORK")" "offline:" || return 1
+  # streak without lastSkip, then with
+  git config -f "$GIT_SYNC_HOME/state" offline.since 2000-01-01T00:00:00+0000 || return 1
+  assert_contains "$(gs status "$WORK")" "offline: skipped since 2000-01-01T00:00:00+0000 (last 2000-01-01T00:00:00+0000)" &&
+  assert_not_contains "$(gs status "$T/p/x")" "offline:" &&
+  assert_not_contains "$(gs status "$T/n")" "offline:" || return 1
+  git config -f "$GIT_SYNC_HOME/state" offline.lastSkip 2000-01-02T00:00:00+0000 || return 1
+  assert_contains "$(gs status "$WORK")" "offline: skipped since 2000-01-01T00:00:00+0000 (last 2000-01-02T00:00:00+0000)" || return 1
+  # pending watch install shows both
+  rm "$T/loaded" && git clone -q "$T/remote.git" "$T/p/y" && out=$(gs status "$T/p/y") &&
+  assert_contains "$out" "not installed yet" && assert_contains "$out" "agent not loaded" &&
+  assert_contains "$out" "offline: skipped since" &&
+  assert_contains "$(gs status --all)" "Agent:         not loaded" &&
+  assert_not_contains "$(gs status --all)" "offline: skipped"
 }
 test_status_no_repos() {
-  out=$(gs status) && assert_contains "$out" "No repos."
+  out=$(gs status --all) && assert_contains "$out" "No repos."
 }
 
 ncalls() { cat "$T/notify.calls" 2>/dev/null; }
@@ -1836,23 +1968,23 @@ test_watch_new_note_24h() {
   make_repos && gs install "$WORK" >/dev/null && mkdir "$T/p" &&
   gs install -r "$T/p" --watch >/dev/null && git clone -q "$T/remote.git" "$T/p/x" &&
   touch "$T/offline" && quiet "$GS" sync --all && rm "$T/offline" &&
-  assert_contains "$(gs status)" "$(printf 'pending  never          %s\n%24snote: new' "$T/p/x" '')" &&
+  assert_contains "$(gs status --all)" "$(printf 'pending  never          %s\n%24snote: new' "$T/p/x" '')" &&
   gs sync --all >/dev/null && gs sync --all >/dev/null &&
   [ -n "$(sget "$T/p/x" watchInstalled)" ] &&
-  assert_contains "$(gs status)" "$(printf 'ok       < 1m ago       %s\n%24snote: new' "$T/p/x" '')" &&
-  assert_contains "$(gs status -v)" "$(printf '%s\n  mode:          fast-forward\n  result:        ok' "$T/p/x")" &&
-  assert_contains "$(gs status -v)" "  note:          new" &&
-  assert_eq "$(gs status | grep -c 'note: new')" 1 &&
+  assert_contains "$(gs status --all)" "$(printf 'ok       < 1m ago       %s\n%24snote: new' "$T/p/x" '')" &&
+  assert_contains "$(gs status --all -v)" "$(printf '%s\n  mode:          fast-forward\n  result:        ok' "$T/p/x")" &&
+  assert_contains "$(gs status --all -v)" "  note:          new" &&
+  assert_eq "$(gs status --all | grep -c 'note: new')" 1 &&
   git config -f "$(sf_of "$T/p/x")" status.watchInstalled "$(date -v-23H +%Y-%m-%dT%H:%M:%S%z)" &&
-  assert_contains "$(gs status)" "note: new" &&
+  assert_contains "$(gs status --all)" "note: new" &&
   git config -f "$(sf_of "$T/p/x")" status.watchInstalled "$(date -v-25H +%Y-%m-%dT%H:%M:%S%z)" &&
-  assert_not_contains "$(gs status)" "note: new" && assert_not_contains "$(gs status -v)" "new"
+  assert_not_contains "$(gs status --all)" "note: new" && assert_not_contains "$(gs status --all -v)" "new"
 }
 test_watch_new_note_when_blocked() {
   make_repos && mkdir "$T/p" && gs install -r "$T/p" --watch >/dev/null &&
   git clone -q "$T/remote.git" "$T/p/x" && git -C "$T/p/x" remote add dead "$T/nope.git" &&
   quiet "$GS" sync --all &&
-  assert_contains "$(gs status)" "$(printf '%24sblocked by: fetch-failed:dead; note: new' '')"
+  assert_contains "$(gs status --all)" "$(printf '%24sblocked by: fetch-failed:dead; note: new' '')"
 }
 test_watch_install_time_not_taken_from_other_fields() {
   make_repos && mkdir "$T/p" && gs install -r "$T/p" --watch >/dev/null &&
@@ -1951,14 +2083,14 @@ test_status_tricky_values() {
   git config -f "$sf" status.result blocked &&
   git config -f "$sf" --add status.blocker 'main:ff-failed fatal: "x" = y; #z \ end' &&
   git config -f "$sf" --add status.blocker 'fetch-failed:origin  two  spaces' &&
-  out=$(gs status -v) &&
+  out=$(gs status --all -v) &&
   assert_contains "$out" '  blocker:       main:ff-failed fatal: "x" = y; #z \ end' &&
   assert_contains "$out" '  blocker:       fetch-failed:origin  two  spaces' &&
-  out=$(gs status) &&
+  out=$(gs status --all) &&
   assert_contains "$out" "blocked  < 1m ago       $WORK" &&
   assert_contains "$out" "blocked by: main:ff-failed, fetch-failed:origin" &&
   git config -f "$sf" status.lastRun garbage &&
-  assert_contains "$(gs status)" "blocked  unknown        $WORK"
+  assert_contains "$(gs status --all)" "blocked  unknown        $WORK"
 }
 test_stale_runfile_removed() {
   make_repos && gs install "$WORK" >/dev/null &&
@@ -2001,10 +2133,13 @@ test_hints_repos() {
   assert_eq "$(hints uninstall "$WORK")" ""
 }
 test_hints_status_flags() {
-  assert_eq "$(hints status | cut -f1 | tr '\n' ' ')" "--verbose --list-order " &&
-  assert_eq "$(hints status -v | cut -f1)" "--list-order" &&
-  assert_eq "$(hints status --list-order | cut -f1)" "--verbose" &&
-  assert_eq "$(hints status --verbose -l)" ""
+  assert_eq "$(hints status | cut -f1 | tr '\n' ' ')" "--all --verbose @dirs " &&
+  assert_eq "$(hints status -v | cut -f1 | tr '\n' ' ')" "--all @dirs " &&
+  assert_eq "$(hints status "$T" | cut -f1 | tr '\n' ' ')" "--verbose " &&
+  assert_eq "$(hints status --all | cut -f1 | tr '\n' ' ')" "--verbose --list-order " &&
+  assert_eq "$(hints status --all -v | cut -f1)" "--list-order" &&
+  assert_eq "$(hints status --all --list-order | cut -f1)" "--verbose" &&
+  assert_eq "$(hints status --all --verbose -l)" ""
 }
 test_hints_config() {
   out=$(hints config) &&
@@ -2039,7 +2174,7 @@ test_hints_notifications() {
 test_hints_zsh_parity() {
   command -v zsh >/dev/null || { echo "    (skipped: no zsh)" >&2; return 0; }
   make_repos "sp ace" && gs install "$WORK" >/dev/null &&
-  for args in "" "install" "install -r" "sync" "uninstall" "uninstall -r" "status -v" "config" "config --global sync.mode" "config sync.period" "config --global sync.disableOfflineCheck" "notifications"; do
+  for args in "" "install" "install -r" "sync" "uninstall" "uninstall -r" "status -v" "status --all" "config" "config --global sync.mode" "config sync.period" "config --global sync.disableOfflineCheck" "notifications"; do
     assert_eq "$(hints_in zsh $args)" "$(hints_in bash $args)" "args: $args" || return 1
   done
 }
@@ -2050,11 +2185,11 @@ test_bash_completion_registers() {
 test_bash_complete_words() {
   out=$(bash_complete git-sync st) &&
   assert_eq "$(echo "$out" | wc -l | tr -d ' ')" 3 &&
-  assert_contains "$out" "status  -- Show agent state and per-repo sync status" &&
+  assert_contains "$out" "status  -- Show sync status of this repo, or all with --all" &&
   assert_contains "$out" "start   -- Install and load the launchd agent" &&
   assert_eq "$(bash_complete git-sync sy)" "sync" &&
   assert_eq "$(bash_complete git-sync config sync.mode fa)" "fast-forward" &&
-  assert_eq "$(bash_complete git-sync status -v --l)" "--list-order" &&
+  assert_eq "$(bash_complete git-sync status --all -v --l)" "--list-order" &&
   assert_eq "$(bash_complete git-sync zz)" ""
 }
 test_bash_complete_install_dirs() {
@@ -2088,7 +2223,7 @@ test_zsh_completion_registers() {
 test_zsh_complete_frontend() {
   command -v zsh >/dev/null || { echo "    (skipped: no zsh)" >&2; return 0; }
   make_repos "a:b c" && gs install "$WORK" >/dev/null &&
-  assert_contains "$(zsh_complete git-sync st)" "describe status:Show agent state and per-repo sync status" &&
+  assert_contains "$(zsh_complete git-sync st)" "describe status:Show sync status of this repo, or all with --all" &&
   assert_eq "$(zsh_complete git-sync uninstall "")" "describe $T/a\\:b c:registered repo" &&
   out=$(zsh_complete git-sync install "") &&
   assert_contains "$out" "describe -r:Add every repo directly inside <dir>" &&

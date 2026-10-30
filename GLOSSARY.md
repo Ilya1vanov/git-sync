@@ -33,6 +33,10 @@ A folder whose depth-1 repos are added to the sync list automatically at each ru
 **Exclusion**:
 A repo under a watched root that the user removed and that git-sync must not add back.
 
+**Pending watch install**:
+A repo under a watched root that is not in the sync list and not excluded; the next run with `--all` adds it to the sync list.
+_Avoid_: watched repo
+
 **Job run**:
 A run started by the agent on its schedule. Only job runs notify.
 _Avoid_: scheduled sync, background run
