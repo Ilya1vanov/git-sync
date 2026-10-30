@@ -1671,7 +1671,7 @@ test_status_local_not_installed() {
   assert_eq "$out" "$(printf '%s\nnot installed (run '"'git-sync install'"')' "$WORK")"
 }
 test_status_local_pending_watch_install() {
-  make_repos && mkdir "$T/p" && gs install -r "$T/p" --watch >/dev/null &&
+  make_repos && touch "$T/loaded" && mkdir "$T/p" && gs install -r "$T/p" --watch >/dev/null &&
   git clone -q "$T/remote.git" "$T/p/x" && cd "$T/p/x" && out=$(gs status) &&
   assert_eq "$out" "$(printf '%s\nwatched (%s), not installed yet: the next '"'sync --all'"' installs it' "$T/p/x" "$T/p")"
 }
@@ -1699,7 +1699,7 @@ test_status_local_exit_zero_and_home_not_created() {
   assert_no_file "$GIT_SYNC_HOME" && gs status --all >/dev/null && assert_no_file "$GIT_SYNC_HOME"
 }
 test_status_local_states_full_paths_with_spaces_and_colons() {
-  make_repos && R="$T/ro ot: a" && mkdir "$R" && gs install -r "$R" --watch >/dev/null &&
+  make_repos && touch "$T/loaded" && R="$T/ro ot: a" && mkdir "$R" && gs install -r "$R" --watch >/dev/null &&
   git clone -q "$T/remote.git" "$R/pend: 1" && git clone -q "$T/remote.git" "$R/exc: 2" &&
   gs install "$R/exc: 2" >/dev/null && gs uninstall "$R/exc: 2" >/dev/null &&
   out=$(gs status "$R/pend: 1") &&
@@ -1724,6 +1724,36 @@ test_status_local_listed_beats_excluded() {
   git clone -q "$T/remote.git" "$T/p/x" && gs install "$T/p/x" >/dev/null &&
   out=$(gs status "$T/p/x") && assert_contains "$out" "  result:        never" &&
   assert_not_contains "$out" "excluded"
+}
+test_status_local_warnings() {
+  make_repos && mkdir "$T/p" && gs install "$WORK" >/dev/null &&
+  gs install -r "$T/p" --watch >/dev/null && git clone -q "$T/remote.git" "$T/p/x" &&
+  git clone -q "$T/remote.git" "$T/n" || return 1
+  # agent not loaded: listed and pending watch install
+  assert_contains "$(gs status "$WORK")" "agent not loaded" &&
+  assert_contains "$(gs status "$T/p/x")" "agent not loaded" &&
+  assert_not_contains "$(gs status "$T/n")" "agent not loaded" || return 1
+  # excluded: no warnings
+  gs install "$T/p/x" >/dev/null && gs uninstall "$T/p/x" >/dev/null &&
+  assert_contains "$(gs status "$T/p/x")" "excluded" &&
+  assert_not_contains "$(gs status "$T/p/x")" "agent not loaded" || return 1
+  # agent loaded, no streak: no warning
+  touch "$T/loaded" &&
+  assert_not_contains "$(gs status "$WORK")" "agent not loaded" &&
+  assert_not_contains "$(gs status "$WORK")" "offline:" || return 1
+  # streak without lastSkip, then with
+  git config -f "$GIT_SYNC_HOME/state" offline.since 2000-01-01T00:00:00+0000 || return 1
+  assert_contains "$(gs status "$WORK")" "offline: skipped since 2000-01-01T00:00:00+0000 (last 2000-01-01T00:00:00+0000)" &&
+  assert_not_contains "$(gs status "$T/p/x")" "offline:" &&
+  assert_not_contains "$(gs status "$T/n")" "offline:" || return 1
+  git config -f "$GIT_SYNC_HOME/state" offline.lastSkip 2000-01-02T00:00:00+0000 || return 1
+  assert_contains "$(gs status "$WORK")" "offline: skipped since 2000-01-01T00:00:00+0000 (last 2000-01-02T00:00:00+0000)" || return 1
+  # pending watch install shows both
+  rm "$T/loaded" && git clone -q "$T/remote.git" "$T/p/y" && out=$(gs status "$T/p/y") &&
+  assert_contains "$out" "not installed yet" && assert_contains "$out" "agent not loaded" &&
+  assert_contains "$out" "offline: skipped since" &&
+  assert_contains "$(gs status --all)" "Agent:         not loaded" &&
+  assert_not_contains "$(gs status --all)" "offline: skipped"
 }
 test_status_no_repos() {
   out=$(gs status --all) && assert_contains "$out" "No repos."

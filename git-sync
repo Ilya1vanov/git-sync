@@ -1895,6 +1895,16 @@ cmd_status() {
   status_render "$verbose" "$list_order"
 }
 
+# status_warnings: staleness warnings, for listed and pending-watch-install repos.
+status_warnings() {
+  local since last
+  if ! agent_loaded; then echo "agent not loaded"; fi
+  if since=$(streak_read since); then
+    last=$(streak_read lastSkip) || last=$since
+    echo "offline: skipped since $since (last $last)"
+  fi
+}
+
 # status_local [PATH]: the report for the repo containing PATH (default: the
 # current directory). Rc 0 in every reported state.
 status_local() {
@@ -1908,6 +1918,7 @@ status_local() {
   if repo_listed "$repo"; then
     status_render 1 0 "$repo"
     if root_watched "$root"; then echo "  watched root:  $root"; fi
+    status_warnings
     return 0
   fi
   echo "$repo"
@@ -1919,6 +1930,7 @@ status_local() {
     fi
   elif root_watched "$root"; then
     echo "watched ($root), not installed yet: the next 'sync --all' installs it"
+    status_warnings
   else
     echo "not installed (run 'git-sync install')"
   fi

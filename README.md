@@ -350,6 +350,13 @@ match wins, and always exits 0. The repo path (main worktree, full) comes first.
 | pending watch install | parent directory is a watched root; not listed, not excluded | `watched (<root>), not installed yet: the next 'sync --all' installs it` |
 | not installed | none of the above | `not installed (run 'git-sync install')` |
 
+For the first and third states (in the sync list, pending watch install) the
+report ends with warnings when the shown status may be stale: `agent not
+loaded` if the launchd agent is not loaded, and `offline: skipped since <first
+skip> (last <latest skip>)` during an offline streak (same values as the
+`Offline:` line of `status --all`). Excluded and not-installed repos show
+neither.
+
 Pending watch install is decided by the parent-directory check only, a cheap
 approximation of the watch scan. A missing git-sync home reads as `not
 installed` and is not created.
