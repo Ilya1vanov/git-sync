@@ -1730,7 +1730,8 @@ cmd_notifications() {
   fi
 }
 
-# status_render VERBOSE LIST_ORDER: the per-repo part of `status`. One awk pass
+# status_render VERBOSE LIST_ORDER [REPO]: the per-repo part of `status`, of
+# every listed repo or only of REPO (an installed repo) when given. One awk pass
 # reads the repo list and every status file (matched by status.path), so the
 # cost does not grow by a process per repo.
 #
@@ -1738,8 +1739,6 @@ cmd_notifications() {
 # columns, then blocker keys if any, else notes if any. Verbose: every field.
 # Order: blocked, error, missing, then the rest (list order within a group);
 # LIST_ORDER=1 keeps plain list order.
-# status_render VERBOSE LIST_ORDER [REPO]: per-repo status of every listed repo,
-# or only of REPO (an installed repo) when given.
 status_render() {
   local verbose=$1 list_order=$2 only=${3-} repo i=0 exists mode gmode
   gmode=$(cfg_get sync.mode)
@@ -1858,7 +1857,7 @@ AWK
 }
 
 cmd_status() {
-  local verbose=0 list_order=0 all=0 path= since last
+  local verbose=0 list_order=0 all=0 path= span
   while [ $# -gt 0 ]; do
     case "$1" in
       -v|--verbose) verbose=1 ;;
@@ -1884,10 +1883,7 @@ cmd_status() {
   else
     echo "Notifications: disabled"
   fi
-  if since=$(streak_read since); then
-    last=$(streak_read lastSkip) || last=$since
-    echo "Offline:       skipped since $since (last $last)"
-  fi
+  if span=$(offline_span); then echo "Offline:       $span"; fi
   if [ -z "$(list_repos)" ]; then
     echo "No repos."
     return 0
@@ -1895,14 +1891,20 @@ cmd_status() {
   status_render "$verbose" "$list_order"
 }
 
+# offline_span: prints "skipped since <first skip> (last <latest skip>)"; rc 1
+# when no offline streak is recorded.
+offline_span() {
+  local since last
+  since=$(streak_read since) || return 1
+  last=$(streak_read lastSkip) || last=$since
+  echo "skipped since $since (last $last)"
+}
+
 # status_warnings: staleness warnings, for listed and pending-watch-install repos.
 status_warnings() {
-  local since last
+  local span
   if ! agent_loaded; then echo "agent not loaded"; fi
-  if since=$(streak_read since); then
-    last=$(streak_read lastSkip) || last=$since
-    echo "offline: skipped since $since (last $last)"
-  fi
+  if span=$(offline_span); then echo "offline: $span"; fi
 }
 
 # status_local [PATH]: the report for the repo containing PATH (default: the

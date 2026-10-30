@@ -360,8 +360,9 @@ neither.
 Pending watch install is decided by the parent-directory check only, a cheap
 approximation of the watch scan. A missing git-sync home reads as `not
 installed` and is not created.
-During an offline streak (consecutive offline skips), the header shows one more
-line after `Notifications:`:
+
+During an offline streak (consecutive offline skips), the `status --all` header
+shows one more line after `Notifications:`:
 
 ```
 Offline:       skipped since <first skip> (last <latest skip>)
