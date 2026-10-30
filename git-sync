@@ -1166,8 +1166,9 @@ Commands:
   uninstall -r <dir> --watch   Stop watching <dir>; its repos stay installed
   list [--watch]               List synced repos, watched roots and exclusions
                                (--watch: only the watched roots, one per line)
-  status [--verbose] [--list-order]
-                               Show agent state and per-repo sync status
+  status [<path>]              Show the sync status of the current (or given) repo
+  status --all [--verbose] [--list-order]
+                               Show agent state and per-repo sync status of all repos
   start                        Install and load the launchd agent
   stop                         Unload and remove the launchd agent
   config [--global] [--force] [--unset] [<key> [<value>]]
@@ -1737,12 +1738,14 @@ cmd_notifications() {
 # columns, then blocker keys if any, else notes if any. Verbose: every field.
 # Order: blocked, error, missing, then the rest (list order within a group);
 # LIST_ORDER=1 keeps plain list order.
+# status_render VERBOSE LIST_ORDER [REPO]: per-repo status of every listed repo,
+# or only of REPO (an installed repo) when given.
 status_render() {
-  local verbose=$1 list_order=$2 repo i=0 exists mode gmode
+  local verbose=$1 list_order=$2 only=${3-} repo i=0 exists mode gmode
   gmode=$(cfg_get sync.mode)
   set --
   for f in "$GS_STATUS_DIR"/*; do [ -f "$f" ] && set -- "$@" "$f"; done
-  list_repos | while IFS= read -r repo; do
+  { if [ -n "$only" ]; then printf '%s\n' "$only"; else list_repos; fi; } | while IFS= read -r repo; do
     i=$((i + 1))
     if [ -d "$repo" ]; then exists=1; else exists=0; fi
     mode=
@@ -1855,15 +1858,25 @@ AWK
 }
 
 cmd_status() {
-  local verbose=0 list_order=0 since last
+  local verbose=0 list_order=0 all=0 path= since last
   while [ $# -gt 0 ]; do
     case "$1" in
       -v|--verbose) verbose=1 ;;
       -l|--list-order) list_order=1 ;;
-      *) usage_die "unknown option for status: $1" ;;
+      --all) all=1 ;;
+      -*) usage_die "unknown option for status: $1" ;;
+      *)
+        [ -z "$path" ] || usage_die "status: only one <path> allowed"
+        path=$1 ;;
     esac
     shift
   done
+  [ "$all" = 0 ] || [ -z "$path" ] || usage_die "status: use either --all or <path>"
+  [ "$all" = 1 ] || [ "$list_order" = 0 ] || usage_die "status: --list-order needs --all"
+  if [ "$all" = 0 ]; then
+    status_local "$path"
+    return 0
+  fi
   if agent_loaded; then echo "Agent:         loaded"; else echo "Agent:         not loaded"; fi
   echo "Period:        $(cfg_get sync.period)"
   if [ "$(cfg_get notify.enabled)" = true ]; then
@@ -1880,6 +1893,35 @@ cmd_status() {
     return 0
   fi
   status_render "$verbose" "$list_order"
+}
+
+# status_local [PATH]: the report for the repo containing PATH (default: the
+# current directory). Rc 0 in every reported state.
+status_local() {
+  local repo root
+  if [ -n "$1" ]; then
+    repo=$(resolve_repo "$1") || die "not a git repository: $1"
+  else
+    repo=$(resolve_repo .) || usage_die "not in a git repository; use 'git-sync status --all'"
+  fi
+  root=$(dirname "$repo")
+  if repo_listed "$repo"; then
+    status_render 1 0 "$repo"
+    if root_watched "$root"; then echo "  watched root:  $root"; fi
+    return 0
+  fi
+  echo "$repo"
+  if repo_excluded "$repo"; then
+    if root_watched "$root"; then
+      echo "excluded from watched root $root (run 'git-sync install' to add it back)"
+    else
+      echo "excluded (run 'git-sync install' to add it back)"
+    fi
+  elif root_watched "$root"; then
+    echo "watched ($root), not installed yet: the next 'sync --all' installs it"
+  else
+    echo "not installed (run 'git-sync install')"
+  fi
 }
 
 # ---- dispatch ----

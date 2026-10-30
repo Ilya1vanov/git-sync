@@ -85,12 +85,12 @@ __git_sync_values() {
 #   @dirs                      complete directory paths
 #   @msg<TAB><text>            free-form value; show <text>
 __git_sync_hints() {
-  local cmd a key= npos=0 has_unset=0
+  local cmd a key= npos=0 has_unset=0 st_all st_path
   if [ $# -eq 0 ]; then
     __git_sync_hint install "Add a repo (default: current) to the sync list"
     __git_sync_hint uninstall "Remove a repo from the sync list"
     __git_sync_hint list "List synced repos"
-    __git_sync_hint status "Show agent state and per-repo sync status"
+    __git_sync_hint status "Show sync status of this repo, or all with --all"
     __git_sync_hint start "Install and load the launchd agent"
     __git_sync_hint stop "Unload and remove the launchd agent"
     __git_sync_hint config "Show or change configuration"
@@ -121,8 +121,22 @@ __git_sync_hints() {
         __git_sync_repos
       fi ;;
     status)
+      # <path> and --all exclude each other; -l (--list-order) is for --all only.
+      st_all=0; st_path=0
+      for a in "$@"; do
+        case $a in
+          --all) st_all=1 ;;
+          -*) ;;
+          *) st_path=1 ;;
+        esac
+      done
+      if [ "$st_all" -eq 0 ] && [ "$st_path" -eq 0 ]; then __git_sync_hint --all "Status of every listed repo"; fi
       case " $* " in *" -v "*|*" --verbose "*) ;; *) __git_sync_hint --verbose "Full per-repo detail" ;; esac
-      case " $* " in *" -l "*|*" --list-order "*) ;; *) __git_sync_hint --list-order "Keep sync-list order" ;; esac ;;
+      if [ "$st_all" -eq 1 ]; then
+        case " $* " in *" -l "*|*" --list-order "*) ;; *) __git_sync_hint --list-order "Keep sync-list order" ;; esac
+      elif [ "$st_path" -eq 0 ]; then
+        echo @dirs
+      fi ;;
     config)
       for a in "$@"; do
         case $a in

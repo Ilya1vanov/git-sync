@@ -185,7 +185,7 @@ Only watch folders where you clone repos you trust.
 ```
 git-sync install [<path>] | install -r <dir> [--watch] | uninstall [<path>] | list [--watch]
 git-sync uninstall -r <dir> --watch
-git-sync status [--verbose] [--list-order]
+git-sync status [<path> | --all [--verbose] [--list-order]]
 git-sync start | stop
 git-sync config [--global] [--force] [--unset] [<key> [<value>]]
 git-sync sync [<path> | --all]
@@ -306,12 +306,17 @@ when Git's own thresholds say so. Git's maintenance scheduler
 ## Status and logs
 
 ```sh
-git-sync status            # agent state, period, notifications, then per repo:
+git-sync status            # the repo containing the current directory: its path,
+                           #   then mode, result, last run/success, every blocker
+                           #   with its detail, every note, and a "watched root:"
+                           #   line if it is in the sync list (-v is accepted, no effect)
+git-sync status <path>     # the same for the repo containing <path>
+git-sync status --all      # agent state, period, notifications, then per repo:
                            #   <result> <last run, time ago> <path>, plus
                            #   blocker keys (or notes) on a second line
-git-sync status --verbose  # full per-repo detail: mode, last run/success,
+git-sync status --all -v   # full per-repo detail: mode, last run/success,
                            #   every blocker with its detail, every note
-git-sync status -l         # keep sync-list order (default: blocked, error,
+git-sync status --all -l   # keep sync-list order (default: blocked, error,
                            #   missing first, then the rest; combines with -v)
 git-sync list              # one line per repo: path, mode, last result, then
                            #   "Watched roots:" and "Excluded:" sections if any
