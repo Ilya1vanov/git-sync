@@ -340,6 +340,19 @@ pending  never          ~/projects/new
 `pending` means the repo is registered but has not been synced yet. `new`
 marks a repo a watched root installed less than 24 hours ago.
 
+The local report (`status` / `status <path>`) shows one of four states, first
+match wins, and always exits 0. The repo path (main worktree, full) comes first.
+
+| State | Meaning | Output after the path |
+|---|---|---|
+| in the sync list | `pending`, `ok`, `blocked` or `error` | the per-repo detail block |
+| excluded | removed from a watched root, or still excluded after the root was removed | `excluded from watched root <root> (run 'git-sync install' to add it back)`; without a watched parent: `excluded (run 'git-sync install' to add it back)` |
+| pending watch install | parent directory is a watched root; not listed, not excluded | `watched (<root>), not installed yet: the next 'sync --all' installs it` |
+| not installed | none of the above | `not installed (run 'git-sync install')` |
+
+Pending watch install is decided by the parent-directory check only, a cheap
+approximation of the watch scan. A missing git-sync home reads as `not
+installed` and is not created.
 During an offline streak (consecutive offline skips), the header shows one more
 line after `Notifications:`:
 

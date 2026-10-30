@@ -1698,6 +1698,33 @@ test_status_local_exit_zero_and_home_not_created() {
   out=$(gs status) && assert_contains "$out" "not installed" &&
   assert_no_file "$GIT_SYNC_HOME" && gs status --all >/dev/null && assert_no_file "$GIT_SYNC_HOME"
 }
+test_status_local_states_full_paths_with_spaces_and_colons() {
+  make_repos && R="$T/ro ot: a" && mkdir "$R" && gs install -r "$R" --watch >/dev/null &&
+  git clone -q "$T/remote.git" "$R/pend: 1" && git clone -q "$T/remote.git" "$R/exc: 2" &&
+  gs install "$R/exc: 2" >/dev/null && gs uninstall "$R/exc: 2" >/dev/null &&
+  out=$(gs status "$R/pend: 1") &&
+  assert_eq "$out" "$(printf '%s\nwatched (%s), not installed yet: the next '"'sync --all'"' installs it' "$R/pend: 1" "$R")" &&
+  out=$(gs status "$R/exc: 2") &&
+  assert_eq "$out" "$(printf '%s\nexcluded from watched root %s (run '"'git-sync install'"' to add it back)' "$R/exc: 2" "$R")" &&
+  git clone -q "$T/remote.git" "$T/lo ne: 3" &&
+  assert_eq "$(gs status "$T/lo ne: 3")" "$(printf '%s\nnot installed (run '"'git-sync install'"')' "$T/lo ne: 3")" &&
+  gs install "$R/exc: 2" >/dev/null && quiet "$GS" sync --all &&
+  out=$(gs status "$R/exc: 2") && assert_contains "$out" "  watched root:  $R"
+}
+test_status_local_excluded_beats_pending_watch_install() {
+  make_repos && mkdir "$T/p" && gs install -r "$T/p" --watch >/dev/null &&
+  git clone -q "$T/remote.git" "$T/p/x" &&
+  assert_contains "$(gs status "$T/p/x")" "watched ($T/p), not installed yet" &&
+  gs install "$T/p/x" >/dev/null && gs uninstall "$T/p/x" >/dev/null &&
+  out=$(gs status "$T/p/x") && assert_contains "$out" "excluded from watched root" &&
+  assert_not_contains "$out" "not installed yet"
+}
+test_status_local_listed_beats_excluded() {
+  make_repos && mkdir "$T/p" && gs install -r "$T/p" --watch >/dev/null &&
+  git clone -q "$T/remote.git" "$T/p/x" && gs install "$T/p/x" >/dev/null &&
+  out=$(gs status "$T/p/x") && assert_contains "$out" "  result:        never" &&
+  assert_not_contains "$out" "excluded"
+}
 test_status_no_repos() {
   out=$(gs status --all) && assert_contains "$out" "No repos."
 }
