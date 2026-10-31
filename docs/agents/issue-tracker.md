@@ -14,6 +14,10 @@ Issues and specs for this repo live as GitHub issues. Use the `gh` CLI for all o
 
 Infer the repo from `git remote -v`; `gh` does this automatically when run inside a clone.
 
+## Closing work
+
+Close each ticket through the commit that finishes it: end that commit's message with `Closes #<n>`. GitHub closes the ticket once the commit reaches `main` on the remote, so pushing `main` closes every finished ticket. Put `Closes #<spec>` in the merge commit that lands a spec.
+
 ## Pull requests as a triage surface
 
 **PRs as a request surface: no.** _(Set to `yes` if this repo treats external PRs as feature requests; `/triage` reads this flag.)_
