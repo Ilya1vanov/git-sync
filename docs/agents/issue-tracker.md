@@ -34,6 +34,8 @@ GitHub shares one number space across issues and PRs, so a bare `#42` may be eit
 
 Create a GitHub issue.
 
+Creating issues in this repo's own tracker needs no confirmation: publish directly. A skill's own review step, such as `/to-tickets` asking for approval of the breakdown, still applies.
+
 ## When a skill says "fetch the relevant ticket"
 
 Run `gh issue view <number> --comments`.
