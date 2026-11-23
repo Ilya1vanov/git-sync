@@ -1,0 +1,7 @@
+#!/bin/sh
+# Block commits that add secrets. Activate with: sh scripts/git-hooks.sh install
+if ! command -v gitleaks >/dev/null 2>&1; then
+  echo "pre-commit: gitleaks not found. Install: brew install gitleaks" >&2
+  exit 1
+fi
+exec gitleaks git --pre-commit --staged --redact --verbose
