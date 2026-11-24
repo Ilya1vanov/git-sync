@@ -69,7 +69,7 @@ Keep out of all of them:
 
 Use placeholders instead (`<name>`, `example.com`, `192.0.2.1`).
 
-Run `sh scripts/git-hooks.sh install` before your first commit in a clone. The hook scans staged changes for secrets with gitleaks. It catches key-shaped secrets only; the other categories above, and commit messages, branch names and issues, are up to you.
+In a fresh clone, run `/iivanou-git-standards:setup` before your first commit, or `git config core.hooksPath .githooks` without the plugin. The hook scans staged changes for secrets with gitleaks. It catches key-shaped secrets only; the other categories above, and commit messages, branch names and issues, are up to you.
 
 When the hook blocks a commit, stop and ask the owner. Bypass it (`--no-verify`, `gitleaks:allow`, `.gitleaksignore`) only with the owner's approval.
 
