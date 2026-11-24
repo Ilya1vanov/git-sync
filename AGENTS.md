@@ -9,7 +9,7 @@ git-sync: a macOS tool that keeps local git clones fresh via a launchd agent. It
 ## Commands
 
 ```sh
-sh tests/run.sh                    # all tests
+sh tests/run.sh                    # all tests, in parallel (GS_TEST_JOBS=N overrides the job count, default min(CPUs, 8))
 sh tests/run.sh test_a test_b      # selected tests (names are test_* functions in tests/run.sh)
 sh install.sh                      # dev setup: this clone's git-sync to ${PREFIX:-~/.local/bin}, completion to ${XDG_DATA_HOME:-~/.local/share}/git-sync
 ./git-sync --version               # "git-sync dev" when unstamped
@@ -38,7 +38,7 @@ Sections are marked `# ---- name ----`; commands are `cmd_<name>` functions, dis
 
 ## Tests (`tests/run.sh`)
 
-Each `test_*` function runs in a subshell after `sandbox`, which creates a temp `HOME`, sets `GIT_SYNC_HOME`, `GIT_SYNC_AGENTS_DIR`, `GIT_CONFIG_GLOBAL`, and stubs `launchctl` (`GIT_SYNC_LAUNCHCTL`), the notifier (`GIT_SYNC_NOTIFY_CMD`) and `route` (`GIT_SYNC_ROUTE`; exits 0 like macOS `route`, printing no route iff `$STUB_DIR/offline` exists), and sets `GIT_SYNC_FETCH_TIMEOUT_MIN=1` (lowers the 30s minimum of `sync.fetchTimeout`); stub calls are logged to `$STUB_DIR/*.calls`. Helpers: `make_repos [dir]` (bare `remote.git`, clone `$WORK`, second clone `pusher`), `push_commit <branch>`, `gs` (runs the script and sets `sync.jitter=0` once the config file exists, unless set), `assert_eq`/`assert_contains`/…, `hints_in`/`tab_complete` for completion, `make_src`/`make_archive` (a fresh repo of the distributed files in `$T/src`, and its `git archive` tarball) and `oneliner` (`install.sh` on stdin from that tarball) for the installer. New tests are discovered automatically by the `test_*()` name pattern. Use repo paths with spaces/colons where relevant (existing tests do).
+Tests run in parallel (`xargs -P`, one `run.sh --one <test>` each), so a test must not rely on machine-wide process state or on tight timeouts: use generous limits (a fast-failing stub under a short `sync.fetchTimeout` flakes under load) and match processes by sandbox path or process group, never by a bare `sleep N`. Each `test_*` function runs in a subshell after `sandbox`, which creates a temp `HOME`, sets `GIT_SYNC_HOME`, `GIT_SYNC_AGENTS_DIR`, `GIT_CONFIG_GLOBAL`, and stubs `launchctl` (`GIT_SYNC_LAUNCHCTL`), the notifier (`GIT_SYNC_NOTIFY_CMD`) and `route` (`GIT_SYNC_ROUTE`; exits 0 like macOS `route`, printing no route iff `$STUB_DIR/offline` exists), and sets `GIT_SYNC_FETCH_TIMEOUT_MIN=1` (lowers the 30s minimum of `sync.fetchTimeout`); stub calls are logged to `$STUB_DIR/*.calls`. Helpers: `make_repos [dir]` (bare `remote.git`, clone `$WORK`, second clone `pusher`), `push_commit <branch>`, `gs` (runs the script and sets `sync.jitter=0` once the config file exists, unless set), `assert_eq`/`assert_contains`/…, `hints_in`/`tab_complete` for completion, `make_src`/`make_archive` (a fresh repo of the distributed files in `$T/src`, and its `git archive` tarball) and `oneliner` (`install.sh` on stdin from that tarball) for the installer. New tests are discovered automatically by the `test_*()` name pattern. Use repo paths with spaces/colons where relevant (existing tests do).
 
 ## Agent skills
 
