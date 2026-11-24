@@ -55,6 +55,7 @@ fi
 exit 0
 EOF
   chmod +x "$T/bin/launchctl" "$T/bin/notify" "$T/bin/route"
+  TO=$(( $$ % 3000 + 100 ))  # a fetch timeout of its own: sleeper told apart by length, see marked
   export STUB_DIR="$T" GIT_SYNC_LAUNCHCTL="$T/bin/launchctl" GIT_SYNC_NOTIFY_CMD="$T/bin/notify"
   export GIT_SYNC_ROUTE="$T/bin/route"
   # lowers the 30s minimum of sync.fetchTimeout so tests can use short timeouts
@@ -839,6 +840,7 @@ hang_stub() {
   chmod +x "$T/bin/ssh" && "$T/bin/ssh" --warm
 }
 # marked: PIDs of live processes carrying the stub marker or a sleeper of N seconds ($1).
+# Tests use their own N ($TO, unique per test) as pgrep sees every process on the machine.
 marked() { pgrep -f "$T/bin/ssh"; [ -z "${1:-}" ] || pgrep -fx "sleep $1"; }
 # gs_ssh ARGS...: run git-sync with the fake ssh first on PATH and no inherited ssh command.
 gs_ssh() { ( unset GIT_SSH_COMMAND GIT_SSH; PATH="$T/bin:$PATH"; gs "$@" ); }
@@ -874,13 +876,14 @@ test_fetch_timeout_normal_fetch_unchanged() {
 }
 test_fetch_timeout_parallel_and_notify() {
   gs notifications enable >/dev/null && gs config --global sync.jobs 2 &&
-  gs config --global sync.fetchTimeout 2 && gs config --global sync.branches develop &&
+  gs config --global sync.fetchTimeout 20 && gs config --global sync.branches develop &&
   make_repos && gs install "$WORK" >/dev/null && ssh_stub &&
   git clone -q "$T/remote.git" "$T/r2" && git -C "$T/r2" branch -q --track develop origin/develop &&
   gs install "$T/r2" >/dev/null &&
   git -C "$WORK" remote add sshr "ssh://example.invalid/x.git" &&
   quiet gs_ssh sync --all --job && assert_contains "$(ncalls)" "fetch-failed:sshr" &&
-  rm -f "$T/notify.calls" && hang_stub && push_commit develop d2 || return 1
+  rm -f "$T/notify.calls" && hang_stub && gs config --global sync.fetchTimeout 2 &&
+  push_commit develop d2 || return 1
   out=$(gs_ssh sync --all 2>&1); rc=$?
   assert_eq $rc 1 && assert_contains "$out" "$WORK: blocked (fetch-timeout:sshr)" &&
   assert_contains "$out" "$T/r2: ok" && assert_not_contains "$out" "Terminated" &&
@@ -888,7 +891,8 @@ test_fetch_timeout_parallel_and_notify() {
   assert_eq "$(git -C "$WORK" rev-parse develop)" "$(git -C "$T/remote.git" rev-parse develop)" &&
   assert_eq "$(marked)" "" || return 1
   # a switch from fetch-failed to fetch-timeout is newly blocked
-  ssh_stub && quiet gs_ssh sync --all --job && rm -f "$T/notify.calls" && hang_stub &&
+  ssh_stub && gs config --global sync.fetchTimeout 20 && quiet gs_ssh sync --all --job &&
+  rm -f "$T/notify.calls" && hang_stub && gs config --global sync.fetchTimeout 2 &&
   quiet gs_ssh sync --all --job && assert_contains "$(ncalls)" "git-sync: work|fetch-timeout:sshr" &&
   assert_eq "$(marked)" ""
 }
@@ -904,8 +908,8 @@ test_fetch_timeout_kill_escalation() {
 # ms: wall clock in milliseconds.
 ms() { perl -MTime::HiRes=time -e 'printf "%d\n", time * 1000'; }
 test_fetch_timeout_kill_grace_is_full() {
-  # 3s: the fake ssh must be up (trap set) when the timeout fires, even under load
-  make_repos && gs install "$WORK" >/dev/null && gs config --global sync.fetchTimeout 3 &&
+  # 8s: the fake ssh must be up (trap set) when the timeout fires, even under load
+  make_repos && gs install "$WORK" >/dev/null && gs config --global sync.fetchTimeout 8 &&
   git -C "$WORK" remote set-url origin "ssh://example.invalid/x.git" || return 1
   # fake ssh that ignores TERM and records when it got it; KILL ends the fetch
   cat > "$T/bin/ssh" <<'EOF'
@@ -924,7 +928,7 @@ EOF
 }
 test_fetch_stopped_on_terminal_input_fails_early() {
   command -v expect >/dev/null || { echo "    (skipped: no expect)" >&2; return 0; }
-  make_repos && gs install "$WORK" >/dev/null && gs config --global sync.fetchTimeout 53 &&
+  make_repos && gs install "$WORK" >/dev/null && gs config --global sync.fetchTimeout $TO &&
   git -C "$WORK" remote set-url origin "ssh://example.invalid/x.git" || return 1
   # fake ssh prompting on the terminal, like ssh without BatchMode
   printf '#!/bin/sh\nprintf "Password: " >/dev/tty; read x </dev/tty; exit 1\n' > "$T/bin/ssh" &&
@@ -938,7 +942,7 @@ test_fetch_stopped_on_terminal_input_fails_early() {
   assert_contains "$(cat "$T/tty.out")" "$WORK: blocked (fetch-failed:origin)" &&
   assert_eq "$(blockers)" "fetch-failed:origin stopped waiting for terminal input" &&
   [ "$el" -lt 15 ] || { echo "    took ${el}s"; return 1; }
-  assert_eq "$(marked 53)" ""
+  assert_eq "$(marked $TO)" ""
 }
 # poll TENTHS CONDITION: re-evaluates CONDITION every 0.1s; fails after TENTHS tries.
 poll() {
@@ -961,10 +965,10 @@ fetches() {
 jitters() { pgrep -g "$RUN_PGID" -fx 'sleep [0-9]+\.[0-9][0-9]'; }
 # leftovers: PIDs of live fake ssh, 53s sleepers, jitter sleeps or workers.
 leftovers() {
-  marked 53; jitters; pgrep -f "__sync-one.*$GIT_SYNC_HOME/run"
+  marked $TO; jitters; pgrep -f "__sync-one.*$GIT_SYNC_HOME/run"
 }
 # interrupted_run READY SIG ARGS...: starts `git-sync ARGS` in the background
-# (own process group, like a terminal job; sync.fetchTimeout should be 53),
+# (own process group, like a terminal job; sync.fetchTimeout should be $TO),
 # waits until the shell condition READY holds, then sends SIG: INT to the whole
 # group (Ctrl-C), TERM to the run alone. Checks the run ends promptly and leaves
 # no fetch, ssh, sleeper or worker behind, no lock, no temp dir, no job notice.
@@ -985,7 +989,7 @@ interrupted_run() {
 }
 test_interrupt_inline_run_stops_fetch() {
   make_repos && gs install "$WORK" >/dev/null && hang_stub &&
-  gs config --global sync.fetchTimeout 53 &&
+  gs config --global sync.fetchTimeout $TO &&
   git -C "$WORK" remote set-url origin "ssh://example.invalid/x.git" || return 1
   for sig in TERM INT; do
     interrupted_run 'fetches 1' "$sig" sync "$WORK" || { echo "    ($sig)"; return 1; }
@@ -996,7 +1000,7 @@ test_interrupt_inline_run_stops_fetch() {
 }
 test_interrupt_keeps_offline_streak() {
   make_repos && gs install "$WORK" >/dev/null && hang_stub &&
-  gs config --global sync.fetchTimeout 53 &&
+  gs config --global sync.fetchTimeout $TO &&
   git -C "$WORK" remote set-url origin "ssh://example.invalid/x.git" &&
   git config -f "$GIT_SYNC_HOME/state" offline.since 2000-01-01T00:00:00+0000 &&
   git config -f "$GIT_SYNC_HOME/state" offline.lastSkip 2000-01-02T00:00:00+0000 || return 1
@@ -1006,7 +1010,7 @@ test_interrupt_keeps_offline_streak() {
 test_interrupt_parallel_run_stops_fetches() {
   make_repos && gs install "$WORK" >/dev/null && hang_stub &&
   git clone -q "$T/remote.git" "$T/r2" && gs install "$T/r2" >/dev/null &&
-  gs config --global sync.fetchTimeout 53 && gs config --global sync.jobs 2 &&
+  gs config --global sync.fetchTimeout $TO && gs config --global sync.jobs 2 &&
   git -C "$WORK" remote set-url origin "ssh://example.invalid/x.git" &&
   git -C "$T/r2" remote set-url origin "ssh://example.invalid/y.git" || return 1
   for sig in TERM INT; do
@@ -1019,7 +1023,7 @@ test_interrupt_parallel_run_stops_fetches() {
 test_interrupt_kills_fetch_that_ignores_term() {
   make_repos && gs install "$WORK" >/dev/null && hang_stub ignore-term &&
   git clone -q "$T/remote.git" "$T/r2" && gs install "$T/r2" >/dev/null &&
-  gs config --global sync.fetchTimeout 53 && gs config --global sync.jobs 2 &&
+  gs config --global sync.fetchTimeout $TO && gs config --global sync.jobs 2 &&
   git -C "$WORK" remote set-url origin "ssh://example.invalid/x.git" &&
   git -C "$T/r2" remote set-url origin "ssh://example.invalid/y.git" || return 1
   for sig in TERM INT; do
@@ -1078,7 +1082,7 @@ EOF
 }
 test_interrupt_removes_fetch_dir_of_killed_worker() {
   make_repos && gs install "$WORK" >/dev/null && hang_stub &&
-  gs config --global sync.fetchTimeout 53 &&
+  gs config --global sync.fetchTimeout $TO &&
   git -C "$WORK" remote set-url origin "ssh://example.invalid/x.git" || return 1
   # fetch.1 stands for the temp dir of a worker of this run that was SIGKILLed
   interrupted_run 'fetches 1 && mkdir -p "$GIT_SYNC_HOME/fetch.1"' TERM sync --all
@@ -2071,11 +2075,14 @@ test_sync_parallel_jobs1_and_missing() {
   assert_contains "$(cat "$GIT_SYNC_HOME/git-sync.log")" "run end: 2 ok, 0 blocked, 1 failed"
 }
 test_sync_jitter_applies_to_all_only() {
-  gs config --global sync.jitter 3 && make_repos && gs install "$WORK" >/dev/null &&
-  start=$(date +%s) && (cd "$WORK" && gs sync >/dev/null) &&
-  [ $(( $(date +%s) - start )) -lt 3 ] &&
-  gs config --global sync.jitter 0 && start=$(date +%s) && gs sync --all >/dev/null &&
-  [ $(( $(date +%s) - start )) -lt 3 ]
+  gs config --global sync.jitter 1 && make_repos && gs install "$WORK" >/dev/null || return 1
+  # a sleep stub records its arguments: a jitter sleep is the only one with a decimal point
+  printf '#!/bin/sh\necho "$1" >> "$STUB_DIR/sleep.calls"\nexec /bin/sleep "$@"\n' > "$T/bin/sleep" &&
+  chmod +x "$T/bin/sleep" && touch "$T/sleep.calls" || return 1
+  (cd "$WORK" && PATH="$T/bin:$PATH" gs sync >/dev/null) &&
+  assert_eq "$(grep -c '\.' "$T/sleep.calls")" 0 &&
+  PATH="$T/bin:$PATH" gs sync --all >/dev/null &&
+  [ "$(grep -c '\.' "$T/sleep.calls")" -ge 1 ] || fail "jitter sleeps: $(cat "$T/sleep.calls")"
 }
 test_status_tricky_values() {
   make_repos "sp ace" && gs install "$WORK" >/dev/null && quiet "$GS" sync --all &&
@@ -2268,9 +2275,18 @@ test_install_sh_completion() {
 if [ $# -gt 0 ]; then TESTS="$*"; else
   TESTS=$(grep -E '^test_[a-z0-9_]+\(\)' "$0" | sed 's/().*//')
 fi
-for t in $TESTS; do
-  if ( sandbox; "$t" ); then PASSES=$((PASSES+1)); echo "PASS $t"
-  else FAILS=$((FAILS+1)); echo "FAIL $t"; fi
-done
+# One test, output printed in one piece so parallel runs do not interleave.
+run_one() {
+  if out=$( ( sandbox; "$1" ) 2>&1 ); then r=PASS; else r=FAIL; fi
+  [ -z "$out" ] || printf '%s\n' "$out"
+  echo "$r $1"; [ "$r" = PASS ]
+}
+if [ "${1:-}" = --one ]; then run_one "$2"; exit; fi
+# Tests run in parallel (GS_TEST_JOBS, default: the CPU count, at most 8: more
+# jobs make the process-heavy tests slower than they gain); each has its own sandbox.
+JOBS=${GS_TEST_JOBS:-$(sysctl -n hw.ncpu 2>/dev/null || echo 4)}
+[ -n "${GS_TEST_JOBS:-}" ] || [ "$JOBS" -le 8 ] || JOBS=8
+RES=$(printf '%s\n' $TESTS | xargs -P "$JOBS" -n1 sh "$0" --one 2>&1); [ -z "$RES" ] || echo "$RES"
+PASSES=$(printf '%s\n' "$RES" | grep -c '^PASS ') FAILS=$(printf '%s\n' "$RES" | grep -c '^FAIL ')
 echo "passed: $PASSES failed: $FAILS"
 [ "$FAILS" -eq 0 ]
